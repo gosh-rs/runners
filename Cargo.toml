@@ -1,0 +1,19 @@
+# cargo
+
+# [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*cargo][cargo:1]]
+[package]
+name = "runners"
+version = "0.0.1"
+edition = "2018"
+authors = ["Wenping Guo <ybyygu@gmail.com>"]
+
+[dependencies]
+structopt = "0.2"
+quicli = "0.4"
+chrono = "0.4"
+duct = "0.12"
+ctrlc = "3.1"
+crossbeam-channel = "0.3"
+
+[dev-dependencies]
+# cargo:1 ends here
