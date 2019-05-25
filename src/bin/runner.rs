@@ -14,18 +14,22 @@ use runners::common::*;
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*structopt][structopt:1]]
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug)]
-#[structopt(name = "runner", about = "local runner")]
+#[structopt(name = "runner", about = "Run a program with graceful exit.")]
 struct Runner {
     #[structopt(flatten)]
     verbosity: Verbosity,
 
-    /// The script file to be run.
-    #[structopt(name = "script file", parse(from_os_str))]
-    script_file: PathBuf,
+    /// The program to be run.
+    #[structopt(name = "program", parse(from_os_str))]
+    program: PathBuf,
 
     /// Job timeout in seconds
     #[structopt(long = "timeout", short = "t")]
     timeout: Option<u64>,
+
+    /// Arguments that will be passed to `program`
+    #[structopt(raw = true)]
+    rest: Vec<String>,
 }
 // structopt:1 ends here
 
@@ -47,7 +51,7 @@ fn ctrlc_channel() -> Result<cbchan::Receiver<()>> {
     Ok(receiver)
 }
 
-fn runcmd_channel(fscript: &PathBuf) -> Result<cbchan::Receiver<u32>> {
+fn runcmd_channel(fscript: &PathBuf, cmd_args: Vec<String>) -> Result<cbchan::Receiver<u32>> {
     let (sender, receiver) = cbchan::bounded(1);
 
     let p = format!("{}", fscript.display());
@@ -57,6 +61,7 @@ fn runcmd_channel(fscript: &PathBuf) -> Result<cbchan::Receiver<u32>> {
         let mut child = process::Command::new("setsid")
             .arg("-w")
             .arg(&p)
+            .args(cmd_args)
             .spawn()
             .expect("failed to execute child");
 
@@ -76,7 +81,7 @@ fn run(args: &Runner) -> Result<()> {
     dbg!(args);
 
     let ctrl_c_events = ctrlc_channel()?;
-    let runcmd_events = runcmd_channel(&args.script_file)?;
+    let runcmd_events = runcmd_channel(&args.program, args.rest.clone())?;
 
     // timeoutlimit control
     let duration = if let Some(t) = args.timeout {
