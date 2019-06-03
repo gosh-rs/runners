@@ -14,11 +14,7 @@ use runners::common::*;
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*structopt][structopt:1]]
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug)]
-#[structopt(name = "runner", about = "Run a program with graceful exit.")]
-struct Runner {
-    #[structopt(flatten)]
-    verbosity: Verbosity,
-
+pub struct Runner {
     /// The program to be run.
     #[structopt(name = "program", parse(from_os_str))]
     program: PathBuf,
@@ -68,7 +64,10 @@ fn runcmd_channel(fscript: &PathBuf, cmd_args: Vec<String>) -> Result<cbchan::Re
         let pid = child.id();
         let _ = sender.send(pid);
         let ecode = child.wait().expect("failed to wait on child");
-        dbg!(ecode);
+        if !ecode.success() {
+            error!("program exits with failure!");
+            dbg!(ecode);
+        }
 
         // normal termination
         let _ = sender.send(0);
@@ -77,7 +76,11 @@ fn runcmd_channel(fscript: &PathBuf, cmd_args: Vec<String>) -> Result<cbchan::Re
     Ok(receiver)
 }
 
-fn run(args: &Runner) -> Result<()> {
+pub fn run(args: &Runner) -> Result<()> {
+    // show program status
+    let app_name = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),);
+
+    println!("{} starts at {}", app_name, timestamp_now());
     dbg!(args);
 
     let ctrl_c_events = ctrlc_channel()?;
@@ -102,14 +105,14 @@ fn run(args: &Runner) -> Result<()> {
     loop {
         cbchan::select! {
             recv(ctrl_c_events) -> _ => {
-                println!("User Interrupted.");
+                println!("User interrupted.");
                 kill = true;
                 break;
             }
             recv(runcmd_events) -> msg => {
                 match msg {
                     Ok(0) => {
-                        println!("Normal Termination.");
+                        println!("Job completed.");
                         kill = false;
                         break;
                     }
@@ -136,6 +139,7 @@ fn run(args: &Runner) -> Result<()> {
             kill_child_processes()?;
         }
     }
+    println!("{} completes at {}", app_name, timestamp_now());
 
     Ok(())
 }
@@ -189,18 +193,21 @@ fn kill_by_session_id(sid: u32) -> Result<()> {
 // main
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*main][main:1]]
+/// A local runner that can make graceful exit
+#[derive(StructOpt, Debug)]
+pub struct Cli {
+    #[structopt(flatten)]
+    verbosity: Verbosity,
+
+    #[structopt(flatten)]
+    runner: Runner,
+}
+
 fn main() -> Result<()> {
-    let args = Runner::from_args();
+    let args = Cli::from_args();
     args.verbosity.setup_env_logger(&env!("CARGO_PKG_NAME"))?;
 
-    // show program status
-    let app_name = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),);
-
-    println!("{} starts at {}", app_name, timestamp_now());
-
-    run(&args)?;
-
-    println!("{} completes at {}", app_name, timestamp_now());
+    run(&args.runner)?;
 
     Ok(())
 }

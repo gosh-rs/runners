@@ -4,6 +4,8 @@
 // :END:
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*lib.rs][lib.rs:1]]
+pub mod local;
+
 pub mod common {
     pub use quicli::prelude::*;
     pub type Result<T> = ::std::result::Result<T, Error>;
