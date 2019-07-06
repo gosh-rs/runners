@@ -15,6 +15,9 @@ duct = "0.12"
 ctrlc = "3.1"
 crossbeam-channel = "0.3"
 tempfile = "3.0"
+rocket = "0.4"
+# mpi = { git = "https://github.com/bsteinb/rsmpi", rev = "f9aec8b8d82" }
+#mpi = "0.5"
 
 [dev-dependencies]
 # cargo:1 ends here

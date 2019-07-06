@@ -16,14 +16,14 @@ pub struct Cli {
     verbosity: Verbosity,
 
     #[structopt(flatten)]
-    runner: Runner,
+    app: Runner,
 }
 
 fn main() -> Result<()> {
     let args = Cli::from_args();
     args.verbosity.setup_env_logger(&env!("CARGO_PKG_NAME"))?;
 
-    run(&args.runner)?;
+    args.app.run()?;
 
     Ok(())
 }

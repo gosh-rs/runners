@@ -5,6 +5,7 @@
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*lib.rs][lib.rs:1]]
 pub mod local;
+pub mod scratch;
 
 pub mod common {
     pub use quicli::prelude::*;

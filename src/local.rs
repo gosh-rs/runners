@@ -27,6 +27,12 @@ pub struct Runner {
     #[structopt(raw = true)]
     rest: Vec<String>,
 }
+
+impl Runner {
+    pub fn run(&self) -> Result<()> {
+        run(&self)
+    }
+}
 // runner:1 ends here
 
 // crossbeam
@@ -35,6 +41,7 @@ pub struct Runner {
 use std::process;
 use std::time::Duration;
 
+use crate::in_temp_dir;
 use crossbeam_channel as cbchan;
 use ctrlc;
 
@@ -52,23 +59,25 @@ fn runcmd_channel(fscript: &PathBuf, cmd_args: Vec<String>) -> Result<cbchan::Re
 
     let p = format!("{}", fscript.display());
     std::thread::spawn(move || {
-        let mut child = process::Command::new("setsid")
-            .arg("-w")
-            .arg(p)
-            .args(cmd_args)
-            .spawn()
-            .expect("failed to execute child");
+        in_temp_dir!({
+            let mut child = process::Command::new("setsid")
+                .arg("-w")
+                .arg(p)
+                .args(cmd_args)
+                .spawn()
+                .expect("failed to execute child");
 
-        let pid = child.id();
-        let _ = sender.send(pid);
-        let ecode = child.wait().expect("failed to wait on child");
-        if !ecode.success() {
-            error!("program exits with failure!");
-            dbg!(ecode);
-        }
+            let pid = child.id();
+            let _ = sender.send(pid);
+            let ecode = child.wait().expect("failed to wait on child");
+            if !ecode.success() {
+                error!("program exits with failure!");
+                dbg!(ecode);
+            }
 
-        // normal termination
-        let _ = sender.send(0);
+            // normal termination
+            let _ = sender.send(0);
+        });
     });
 
     Ok(receiver)
@@ -133,7 +142,7 @@ pub fn run(args: &Runner) -> Result<()> {
     if kill {
         println!("Kill running processes ... ");
         if session_id > 0 {
-            kill_by_session_id(session_id)?;
+            terminate_session(session_id)?;
         } else {
             kill_child_processes()?;
         }
@@ -144,86 +153,10 @@ pub fn run(args: &Runner) -> Result<()> {
 }
 // crossbeam:1 ends here
 
-// temp/scratch
-// run external program in a sandbox/scratch environment
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*temp/scratch][temp/scratch:1]]
-use tempfile::{tempdir, tempdir_in, TempDir};
-
-#[derive(Debug)]
-pub struct Sandbox {
-    /// Set the run script file for calculation.
-    run_file: PathBuf,
-
-    /// Set the root directory for scratch files.
-    scr_dir: Option<PathBuf>,
-
-    // for internal uses
-    temp_dir: Option<TempDir>,
-}
-
-impl Default for Sandbox {
-    fn default() -> Self {
-        Self {
-            run_file: "submit.sh".into(),
-            scr_dir: None,
-            temp_dir: None,
-        }
-    }
-}
-
-impl Sandbox {
-    /// Return a temporary directory under `BBM_SCR_ROOT` for safe calculation.
-    fn new_scratch_directory(&self) -> Result<TempDir> {
-        if let Some(ref scr_root) = self.scr_dir {
-            info!("set scratch root directory as: {:?}", scr_root);
-            Ok(tempdir_in(scr_root)?)
-        } else {
-            let tdir = tempdir()?;
-            debug!("scratch root directory is not set, use the system default.");
-            Ok(tdir)
-        }
-    }
-
-    /// Call external script
-    fn safe_call(&mut self, input: &str) -> Result<String> {
-        debug!("run script file: {}", self.run_file.display());
-
-        // re-use the same scratch directory for multi-step calculation, e.g.
-        // optimization.
-        let mut tdir_opt = self.temp_dir.take();
-
-        let tdir = tdir_opt.get_or_insert_with(|| {
-            self.new_scratch_directory()
-                .map_err(|e| format_err!("Failed to create scratch directory:\n {:?}", e))
-                .unwrap()
-        });
-
-        let ptdir = tdir.path();
-        debug!("scratch dir: {}", ptdir.display());
-
-        let cmdline = format!("{}", self.run_file.display());
-        debug!("submit cmdline: {}", cmdline);
-
-        let cdir = std::env::current_dir()?;
-        let cmd_results = cmd!(&cmdline)
-            .dir(ptdir)
-            .env("BBM_WRK_DIR", cdir)
-            .input(input)
-            .read();
-
-        // for re-using the scratch directory
-        self.temp_dir = tdir_opt;
-
-        Ok(cmd_results?)
-    }
-}
-// temp/scratch:1 ends here
-
 // utils
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*utils][utils:1]]
-/// kill child processes based on pstree cmd, potentially dangerous
+/// kill child processes based on pstree cmd, which is not very reliable.
 fn kill_child_processes() -> Result<()> {
     let pid = format!("{}", process::id());
 
@@ -234,6 +167,7 @@ fn kill_child_processes() -> Result<()> {
         .read()?;
 
     let mut sub_pids: std::collections::HashSet<_> = output.split_whitespace().collect();
+
     // remove main process id from process list
     sub_pids.remove(pid.as_str());
 
@@ -247,13 +181,33 @@ fn kill_child_processes() -> Result<()> {
     Ok(())
 }
 
-/// kill child processes by session id
-fn kill_by_session_id(sid: u32) -> Result<()> {
-    // cmdline: kill -- $(ps -s $1 -o pid=)
+/// terminate child processes in a session.
+pub fn terminate_session(sid: u32) -> Result<()> {
+    signal_processes_by_session_id(sid, "SIGTERM")
+}
+
+/// Kill processes in a session.
+pub fn kill_session(sid: u32) -> Result<()> {
+    signal_processes_by_session_id(sid, "SIGKILL")
+}
+
+/// Resume processes in a session.
+pub fn resume_session(sid: u32) -> Result<()> {
+    signal_processes_by_session_id(sid, "SIGCONT")
+}
+
+/// Pause processes in a session.
+pub fn pause_session(sid: u32) -> Result<()> {
+    signal_processes_by_session_id(sid, "SIGSTOP")
+}
+
+/// signal processes by session id
+fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
+    // cmdline: kill -CONT -- $(ps -s $1 -o pid=)
     let output = cmd!("ps", "-s", format!("{}", sid), "-o", "pid=").read()?;
     let pids: Vec<_> = output.split_whitespace().collect();
 
-    let mut args = vec!["--"];
+    let mut args = vec!["-s", signal, "--"];
     args.extend(&pids);
     if !pids.is_empty() {
         cmd("kill", &args).unchecked().run()?;
