@@ -12,12 +12,17 @@ structopt = "0.2"
 quicli = "0.4"
 chrono = "0.4"
 duct = "0.12"
-ctrlc = "3.1"
-crossbeam-channel = "0.3"
+serde = { version = "1.0", features = ["derive"] }
 tempfile = "3.0"
-rocket = "0.4"
+futures = "*"
+tokio = "0.1"
+tokio-signal = "0.2"
+tokio-process = "0.2"
+warp = "0.1"
+# rain_task = "0.4"
+# rocket = "0.4"
 # mpi = { git = "https://github.com/bsteinb/rsmpi", rev = "f9aec8b8d82" }
-#mpi = "0.5"
+# mpi = "0.5"
 
 [dev-dependencies]
 # cargo:1 ends here

@@ -2,9 +2,9 @@
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*imports][imports:1]]
 use std::path::PathBuf;
+use std::process;
+use std::time::Duration;
 use structopt::StructOpt;
-
-use duct::cmd;
 
 use crate::common::*;
 // imports:1 ends here
@@ -35,127 +35,75 @@ impl Runner {
 }
 // runner:1 ends here
 
-// crossbeam
+// tokio
 
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*crossbeam][crossbeam:1]]
-use std::process;
-use std::time::Duration;
-
-use crate::in_temp_dir;
-use crossbeam_channel as cbchan;
-use ctrlc;
-
-fn ctrlc_channel() -> Result<cbchan::Receiver<()>> {
-    let (sender, receiver) = cbchan::bounded(1);
-    ctrlc::set_handler(move || {
-        let _ = sender.send(());
-    })?;
-
-    Ok(receiver)
-}
-
-fn runcmd_channel(fscript: &PathBuf, cmd_args: Vec<String>) -> Result<cbchan::Receiver<u32>> {
-    let (sender, receiver) = cbchan::bounded(1);
-
-    let p = format!("{}", fscript.display());
-    std::thread::spawn(move || {
-        in_temp_dir!({
-            let mut child = process::Command::new("setsid")
-                .arg("-w")
-                .arg(p)
-                .args(cmd_args)
-                .spawn()
-                .expect("failed to execute child");
-
-            let pid = child.id();
-            let _ = sender.send(pid);
-            let ecode = child.wait().expect("failed to wait on child");
-            if !ecode.success() {
-                error!("program exits with failure!");
-                dbg!(ecode);
-            }
-
-            // normal termination
-            let _ = sender.send(0);
-        });
-    });
-
-    Ok(receiver)
-}
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*tokio][tokio:1]]
+use tokio::prelude::*;
+use tokio_process::CommandExt;
+use tokio_signal::unix::{Signal, SIGINT, SIGTERM};
 
 pub fn run(args: &Runner) -> Result<()> {
     // show program status
     let app_name = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),);
-
     println!("{} starts at {}", app_name, timestamp_now());
     dbg!(args);
 
-    let ctrl_c_events = ctrlc_channel()?;
+    // Use the standard library's `Command` type to build a process and then
+    // execute it via the `CommandExt` trait.
+    let child = process::Command::new("setsid")
+        .arg("-w")
+        .arg(&args.program)
+        .args(&args.rest)
+        .spawn_async()
+        .map_err(|e| {
+            error!("Error while constructing command, details:\n {}", e);
+            e
+        })?;
 
-    let runcmd_events = runcmd_channel(&args.program, args.rest.clone())?;
+    let session_id = child.id();
+    info!("Job session id: {}", session_id);
 
-    // timeout control
-    let duration = if let Some(t) = args.timeout {
-        Some(Duration::from_secs(t))
-    } else {
-        None
-    };
+    // Create an infinite stream of signal notifications. Each item received on
+    // this stream may represent multiple signals.
+    let sig_int = Signal::new(SIGINT).flatten_stream().map_err(|e| ());
+    let sig_term = Signal::new(SIGTERM).flatten_stream().map_err(|e| ());
 
-    // Create a channel that times out after the specified duration.
-    let timeout = duration
-        .map(|d| cbchan::after(d))
-        .unwrap_or(cbchan::never());
+    // When timeout, send TERM signal. Default timeout = 30 days
+    let t = args.timeout.unwrap_or(3600 * 24 * 30);
+    let timeout = Duration::from_secs(t);
 
-    // user interruption
-    let mut kill = false;
-    let mut session_id = 0;
-    println!("Press Ctrl-C to stop ...");
-    loop {
-        cbchan::select! {
-            recv(ctrl_c_events) -> _ => {
-                println!("User interrupted.");
-                kill = true;
-                break;
-            }
-            recv(runcmd_events) -> msg => {
-                match msg {
-                    Ok(0) => {
-                        println!("Job completed.");
-                        kill = false;
-                        break;
-                    }
-                    Ok(pid) => {
-                        info!("script session id: {}", pid);
-                        session_id = pid;
-                    }
-                    _ => unreachable!()
-                }
-            }
-            recv(timeout) -> _ => {
-                println!("Job reaches timeout ...");
-                kill = true;
-                break;
-            },
-        }
-    }
+    // Use the `select` combinator to merge these streams into one. Process
+    // signal as it comes in.
+    let signals = sig_int
+        .select(sig_term)
+        .timeout(timeout)
+        .take(1)
+        .for_each(move |_| {
+            println!("User interrupted.");
+            println!("Kill running processes ({}) ... ", session_id);
+            terminate_session(session_id).unwrap();
+            Ok(())
+        })
+        .map_err(move |_| {
+            error!("Command timeout after {} seconds!", t);
+            terminate_session(session_id).unwrap();
+        });
 
-    if kill {
-        println!("Kill running processes ... ");
-        if session_id > 0 {
-            terminate_session(session_id)?;
-        } else {
-            kill_child_processes()?;
-        }
-    }
-    println!("{} completes at {}", app_name, timestamp_now());
+    let cmd = child
+        .map(|status| println!("exit status: {:?}", status))
+        .map_err(|e| error!("cmd failed with errors\n: {}", e));
+
+    tokio::run(signals.select2(cmd).map(|_| ()).map_err(|_| ()));
 
     Ok(())
 }
-// crossbeam:1 ends here
+// tokio:1 ends here
 
 // utils
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*utils][utils:1]]
+use duct::cmd;
+
 /// kill child processes based on pstree cmd, which is not very reliable.
 fn kill_child_processes() -> Result<()> {
     let pid = format!("{}", process::id());
