@@ -17,7 +17,7 @@ use runners::common::*;
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
 /// A local runner that can make graceful exit
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Debug, Clone)]
 pub struct Cmd {
     /// The program to be run.
     #[structopt(name = "program", parse(from_os_str))]
@@ -184,22 +184,18 @@ use std::sync::{Arc, Mutex};
 // base
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
+type Input = Option<InputChunk>;
+type Output = OutputChunk;
+
 /// Stateful object holding the connection to the Nailgun server.
 struct NailgunConnection {
     addr: String,
-    /// client side requests
-    requests: Option<Sender<InputChunk>>,
-
-    /// server side responses
-    responses: Option<Receiver<OutputChunk>>,
 }
 
 impl Default for NailgunConnection {
     fn default() -> Self {
         Self {
             addr: "192.168.0.199:2113".into(),
-            requests: None,
-            responses: None,
         }
     }
 }
@@ -222,29 +218,41 @@ impl NailgunConnection {
     /// Sends the command and environment to the nailgun server, then loops
     /// forever reading the response until the server sends an exit chunk.
     /// Returns the exit value, or raises NailgunException on error.
-    fn send_command(&mut self) -> Result<()> {
-        // server side stream
-        let (srv_tx, srv_rx) = tokio::sync::mpsc::channel::<InputChunk>(1);
+    fn send_command(&mut self, cmd: Cmd) -> Result<()> {
+        // server side stream. None indicates stream termination.
+        let (srv_tx, srv_rx) = tokio::sync::mpsc::channel::<Input>(1);
 
         // client side stream
-        let (cli_tx, cli_rx) = tokio::sync::mpsc::channel::<OutputChunk>(1);
+        let (cli_tx, cli_rx) = tokio::sync::mpsc::channel::<Output>(1);
+
+        // exit signal
+        let (ext_tx, ext_rx) = tokio::sync::mpsc::channel::<()>(1);
 
         // set up server/client stream pipes
         let addr = self.addr.parse()?;
+
+        // build a client
         let client = TcpStream::connect(&addr)
             .and_then(move |sock| {
-                setup_handlers(sock, cli_tx, srv_rx);
+                println!("server connected.");
+                // stream redirection
+                setup_handlers(sock, cli_tx, srv_rx, ext_tx);
+
+                // make sure connection is alive.
+                send_heartbeat(srv_tx.clone(), ext_rx);
+
+                // request server to run the command
+                let p = format!("{}", cmd.program.display());
+                send_command_chunks(srv_tx.clone(), &p);
+
+                // client-server communication
+                process_responses(cli_rx, srv_tx.clone());
+
                 Ok(())
             })
-            .map_err(|_| ());
+            .map_err(|e| error!("{}", e));
 
-        tokio::run(futures::lazy(move || {
-            tokio::spawn(client);
-            send_command_chunks(srv_tx.clone(), "/tmp/a.sh");
-            process_responses(cli_rx, srv_tx);
-
-            Ok(())
-        }));
+        tokio::run(client);
 
         Ok(())
     }
@@ -257,15 +265,18 @@ impl NailgunConnection {
 /// setup stream handlers
 fn setup_handlers(
     socket: tokio::net::TcpStream,
-    cli_tx: Sender<OutputChunk>,
-    srv_rx: Receiver<InputChunk>,
+    cli_tx: Sender<Output>,
+    srv_rx: Receiver<Input>,
+    ext_tx: Sender<()>,
 ) {
     let (sink, stream) = Codec.framed(socket).split();
 
     // input stream handler
     let fut = srv_rx
         .map_err(|e| error!("channel error {}", e))
-        .forward(sink.sink_map_err(|err| error!("sink error: {}", err)))
+        .take_while(|item| Ok(item.is_some()))
+        .map(Option::unwrap)
+        .forward(sink.sink_map_err(|err| error!("srv_rx, sink error: {}", err)))
         .map(|_| {
             println!("send chunk");
         });
@@ -274,18 +285,22 @@ fn setup_handlers(
     // output stream handler
     let fut = stream
         .map_err(|e| error!("channel error {}", e))
-        .take_while(|item| match item {
+        .take_while(move |item| match item {
             OutputChunk::Exit(0) => {
                 println!("Command done.");
+                let tx = ext_tx.clone();
+                tx.send(()).wait().unwrap();
                 Ok(false)
             }
             OutputChunk::Exit(ecode) => {
                 error!("Command failed with status code = {}", ecode);
+                let tx = ext_tx.clone();
+                tx.send(()).wait().unwrap();
                 Ok(false)
             }
             _ => Ok(true),
         })
-        .forward(cli_tx.sink_map_err(|err| error!("sink error: {}", err)))
+        .forward(cli_tx.sink_map_err(|err| error!("cli_tx, sink error: {}", err)))
         .map(|_| {
             println!("receive chunk");
         });
@@ -293,11 +308,11 @@ fn setup_handlers(
 }
 // setup:1 ends here
 
-// send command
+// command
 
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*send%20command][send command:1]]
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*command][command:1]]
 /// request server to run a command
-fn send_command_chunks(tx: Sender<InputChunk>, command: &str) {
+fn send_command_chunks(tx: Sender<Input>, command: &str) {
     let cwd = InputChunk::WorkingDir("/tmp".into());
     let cmd = InputChunk::Command(command.into());
     tokio::spawn(
@@ -309,17 +324,58 @@ fn send_command_chunks(tx: Sender<InputChunk>, command: &str) {
             }),
     );
 }
-// send command:1 ends here
+// command:1 ends here
+
+// heartbeat
+
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*heartbeat][heartbeat:1]]
+/// request server to run a command
+fn send_heartbeat(tx: Sender<Input>, shutdown: tokio::sync::mpsc::Receiver<()>) {
+    use std::time::Duration;
+    use tokio::timer::Interval;
+
+    // The stream of received `usize` values will be merged with a 30
+    // second interval stream. The value types of each stream must
+    // match. This enum is used to track the various values.
+    #[derive(Eq, PartialEq)]
+    enum Item {
+        Tick,
+        Done,
+    }
+
+    // Interval at which the current sum is written to STDOUT.
+    let tick_dur = Duration::from_secs(1);
+    let interval = Interval::new_interval(tick_dur)
+        .map(move |_| {
+            if let Ok(_) = send_chunk(tx.clone(), InputChunk::Heartbeat).wait() {
+                Item::Tick
+            } else {
+                tx.clone().send(None).wait();
+                Item::Done
+            }
+        })
+        .map_err(|e| panic!("timer failed; err={:?}", e));
+
+    let fut = shutdown
+        .map_err(|_| ())
+        .map(|x| Item::Done)
+        .select(interval)
+        .take_while(|item| Ok(*item != Item::Done))
+        .for_each(|_| Ok(()));
+
+    tokio::spawn(fut);
+}
+// heartbeat:1 ends here
 
 // input chunk
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*input%20chunk][input chunk:1]]
 /// handle client requests
 fn send_chunk(
-    tx: Sender<InputChunk>,
+    tx: Sender<Input>,
     chunk: InputChunk,
-) -> impl Future<Item = Sender<InputChunk>, Error = String> {
-    tx.send(chunk).map(|s| s).map_err(|_| "send-error".into())
+) -> impl Future<Item = Sender<Input>, Error = String> {
+    tx.send(Some(chunk)).map_err(|_| "send-error".into())
 }
 // input chunk:1 ends here
 
@@ -327,41 +383,42 @@ fn send_chunk(
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*output%20chunk][output chunk:1]]
 // process server responses
-fn process_responses(rx: Receiver<OutputChunk>, tx: Sender<InputChunk>) {
-    tokio::spawn(
-        rx.map_err(|_| ())
-            .for_each(move |item| match item {
-                // process error stream
-                OutputChunk::Stderr(err) => {
-                    dbg!(err);
-                    Ok(())
-                }
-                // process output stream
-                OutputChunk::Stdout(out) => {
-                    dbg!(out);
-                    Ok(())
-                }
-                // send input stream
-                OutputChunk::StartReadingStdin => {
-                    let mut buf = vec![];
-                    tokio::io::stdin()
-                        .read_to_end(&mut buf)
-                        .expect("read stdin");
-                    if !buf.is_empty() {
-                        let chunk = InputChunk::Stdin(buf.into());
-                        send_chunk(tx.clone(), chunk);
-                    }
-                    let eof = InputChunk::StdinEOF;
-                    send_chunk(tx.clone(), eof);
-                    Ok(())
-                }
-                _ => {
-                    dbg!(item);
-                    Ok(())
-                }
-            })
-            .map(|_| ()),
-    );
+fn process_responses(rx: Receiver<Output>, tx: Sender<Input>) {
+    let fut = rx
+        .map_err(|_| ())
+        .for_each(move |item| match item {
+            // process error stream
+            OutputChunk::Stderr(err) => {
+                dbg!(err);
+                Ok(())
+            }
+            // process output stream
+            OutputChunk::Stdout(out) => {
+                dbg!(out);
+                Ok(())
+            }
+            // send input stream
+            OutputChunk::StartReadingStdin => {
+                // let mut buf = vec![];
+                // tokio::io::stdin()
+                //     .read_to_end(&mut buf)
+                //     .expect("read stdin");
+                // if !buf.is_empty() {
+                //     let chunk = InputChunk::Stdin(buf.into());
+                //     send_chunk(tx.clone(), chunk).wait().unwrap();
+                // }
+                // let eof = InputChunk::StdinEOF;
+                // send_chunk(tx.clone(), eof).wait().unwrap();
+                Ok(())
+            }
+            _ => {
+                dbg!(item);
+                Ok(())
+            }
+        })
+        .map(|_| ());
+
+    tokio::spawn(fut);
 }
 // output chunk:1 ends here
 
@@ -387,7 +444,7 @@ fn main() -> Result<()> {
     args.verbosity.setup_env_logger(&env!("CARGO_PKG_NAME"))?;
 
     let mut ng = NailgunConnection::default();
-    ng.send_command()?;
+    ng.send_command(args.cmd.clone())?;
 
     Ok(())
 }
