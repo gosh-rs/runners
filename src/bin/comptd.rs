@@ -15,8 +15,7 @@ fn main() -> Result<()> {
     let args = Cli::from_args();
     args.verbosity.setup_env_logger(&env!("CARGO_PKG_NAME"))?;
 
-    test();
-
+    run();
     Ok(())
 }
 // main/warp:1 ends here

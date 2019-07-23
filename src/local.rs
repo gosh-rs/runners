@@ -1,7 +1,7 @@
 // imports
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*imports][imports:1]]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 use structopt::StructOpt;
@@ -29,8 +29,36 @@ pub struct Runner {
 }
 
 impl Runner {
+    /// Run program
     pub fn run(&self) -> Result<()> {
         run(&self)
+    }
+
+    pub fn new<P: AsRef<Path>>(program: P) -> Self {
+        Self {
+            program: program.as_ref().into(),
+            rest: vec![],
+            timeout: None,
+        }
+    }
+
+    /// Set program argument
+    pub fn with_arg<S: AsRef<str>>(mut self, arg: S) -> Self {
+        self.rest.push(arg.as_ref().into());
+        self
+    }
+
+    /// Set runner timeout
+    pub fn with_timeout(mut self, t: u64) -> Self {
+        self.timeout = Some(t);
+        self
+    }
+
+    /// Spawn child process in a new session.
+    pub fn build_command(&self) -> std::process::Command {
+        let mut cmd = process::Command::new("setsid");
+        cmd.arg("-w").arg(&self.program).args(&self.rest);
+        cmd
     }
 }
 // runner:1 ends here
@@ -50,15 +78,10 @@ pub fn run(args: &Runner) -> Result<()> {
 
     // Use the standard library's `Command` type to build a process and then
     // execute it via the `CommandExt` trait.
-    let child = process::Command::new("setsid")
-        .arg("-w")
-        .arg(&args.program)
-        .args(&args.rest)
-        .spawn_async()
-        .map_err(|e| {
-            error!("Error while constructing command, details:\n {}", e);
-            e
-        })?;
+    let child = args.build_command().spawn_async().map_err(|e| {
+        error!("Error while constructing command, details:\n {}", e);
+        e
+    })?;
 
     let session_id = child.id();
     info!("Job session id: {}", session_id);

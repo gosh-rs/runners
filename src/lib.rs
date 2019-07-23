@@ -8,6 +8,7 @@
 pub mod local;
 pub mod scratch;
 pub mod server;
+pub mod client;
 
 pub(crate) mod job;
 pub mod serv_warp;
