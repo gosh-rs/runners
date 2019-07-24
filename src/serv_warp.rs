@@ -21,16 +21,24 @@ use crate::server::*;
 /// a simple in-memory DB, a vector synchronized by a mutex.
 type Db = Arc<Mutex<Vec<Job>>>;
 
+#[derive(Clone, Debug)]
+pub enum JobStatus {
+    NotStarted,
+    Running,
+    /// failure code
+    Failure(i32),
+    Success,
+}
+
+impl Default for JobStatus {
+    fn default() -> Self {
+        Self::NotStarted
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Job {
     id: u64,
-
-    #[serde(default, skip)]
-    wrk_dir: Option<tempfile::TempDir>,
-
-    // command session
-    #[serde(default, skip)]
-    session: Option<tokio_process::Child>,
 
     out_file: String,
 
@@ -38,21 +46,94 @@ pub struct Job {
 
     run_file: String,
 
+    script: String,
+
+    input: String,
+
     inp_file: String,
+
+    #[serde(skip)]
+    status: JobStatus,
+
+    #[serde(skip)]
+    wrk_dir: Option<tempfile::TempDir>,
+
+    // command session
+    #[serde(skip)]
+    session: Option<tokio_process::Child>,
 }
 
 impl Job {
-    pub fn new(id: u64) -> Self {
-        let wdir = tempfile::tempdir().expect("temp dir");
+    ///
+    /// Construct a Job with shell script of job run_file.
+    ///
+    /// # Parameters
+    ///
+    /// * script: the content of the run script of the job.
+    ///
+    pub fn new(id: u64, script: &str) -> Self {
         Self {
             id,
-            session: None,
+
+            script: script.into(),
+            input: String::new(),
+
             out_file: "job.out".into(),
             err_file: "job.err".into(),
             run_file: "run".into(),
             inp_file: "job.inp".into(),
-            wrk_dir: Some(wdir),
+
+            // state variables
+            status: JobStatus::default(),
+            session: None,
+            wrk_dir: None,
         }
+    }
+
+    /// Create runnable script file and stdin file from self.script and
+    /// self.input.
+    fn build(&mut self) {
+        use std::fs::File;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // create working directory in scratch space.
+        let wdir = tempfile::tempdir().expect("temp dir");
+        self.wrk_dir = Some(wdir);
+
+        // create run file
+        let file = self.run_file();
+
+        // make run script executable
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .mode(0o770)
+            .open(&file)
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(self.script.as_bytes());
+                trace!("script content wrote to: {}.", file.display());
+            }
+            Err(e) => {
+                panic!("Error whiling creating job run file: {}", e);
+            }
+        }
+        let file = self.inp_file();
+        match File::create(&self.inp_file()) {
+            Ok(mut f) => {
+                let _ = f.write_all(self.input.as_bytes());
+                trace!("input content wrote to: {}.", file.display());
+            }
+            Err(e) => {
+                panic!("Error while creating job input file: {}", e);
+            }
+        }
+    }
+
+    /// Set content of job stdin stream.
+    pub fn with_stdin(mut self, content: &str) -> Self {
+        self.input = content.into();
+        self
     }
 
     /// Return full path to computation output file (stdout).
@@ -107,15 +188,20 @@ impl Job {
         if let Some(d) = &self.wrk_dir {
             info!("job {}, work direcotry: {}", self.id, d.path().display());
 
-            let runner = Runner::new("/tmp/a.sh");
+            let runner = Runner::new(&self.run_file());
             let mut child = runner
                 .build_command()
                 .current_dir(d)
+                .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn_async()
                 .expect("spawn command session");
 
+            let mut stdin = child
+                .stdin()
+                .take()
+                .expect("child did not have a handle to stdout");
             let stdout = child
                 .stdout()
                 .take()
@@ -125,16 +211,21 @@ impl Job {
                 .take()
                 .expect("child did not have a handle to stderr");
 
+            // NOTE: suppose stdin stream is small.
+            stdin.write_all(self.input.as_bytes()).expect("write stdin");
+
+            // redirect stdout and stderr to files for user inspection.
             let save_stdout = tokio::fs::File::create(self.out_file())
                 .and_then(move |f| tokio::io::copy(stdout, f))
-                .map(|_| ())
+                .map(move |_| ())
                 .map_err(|e| panic!("error while saving stdout: {}", e));
             let save_stderr = tokio::fs::File::create(self.err_file())
                 .and_then(move |f| tokio::io::copy(stderr, f))
                 .map(|_| ())
                 .map_err(|e| panic!("error while saving stderr: {}", e));
-            tokio::spawn(save_stdout);
+
             tokio::spawn(save_stderr);
+            tokio::spawn(save_stdout);
 
             let sid = child.id();
             info!("command running in session {}", sid);
@@ -157,6 +248,14 @@ impl Job {
             debug!("Job not started yet.");
         }
     }
+
+    fn wait(&mut self) {
+        if let Some(mut child) = self.session.take() {
+            child.wait_with_output().wait();
+        } else {
+            error!("Job not started yet.");
+        }
+    }
 }
 
 impl Drop for Job {
@@ -171,7 +270,7 @@ impl Drop for Job {
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*create%20job][create job:1]]
 /// POST /jobs with JSON body
-fn create_job(create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     info!("create_job: {:?}", create);
 
     let mut vec = db.lock().unwrap();
@@ -185,15 +284,13 @@ fn create_job(create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> 
     }
 
     // run command
-    use crate::local::Runner;
-
-    let mut job = Job::new(create.id);
-
-    job.start();
-    // job.run();
+    // use crate::local::Runner;
+    // let mut job = Job::new(create.id);
+    create.build();
+    create.start();
 
     // No existing Job with id, so insert and return `201 Created`.
-    vec.push(job);
+    vec.push(create);
 
     Ok(warp::http::StatusCode::CREATED)
 }
@@ -253,7 +350,7 @@ fn list_jobs(db: Db) -> impl warp::Reply {
     warp::reply::json(&*db.lock().unwrap())
 }
 
-/// GET /jobs/:id
+/// GET /jobs/:id/files
 ///
 /// List files in job working directory
 fn list_job_files(id: u64, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
@@ -352,6 +449,53 @@ pub fn put_job_file(
 }
 // job files:1 ends here
 
+// shutdown
+
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*shutdown][shutdown:1]]
+/// DELETE /jobs
+/// shutdown server
+fn shutdown_server(db: Db) -> impl warp::Reply {
+    info!("shudown server now ...");
+    // drop jobs
+    let mut jobs = db.lock().unwrap();
+    jobs.clear();
+
+    send_signal(tokio_signal::unix::SIGINT);
+    warp::http::StatusCode::NO_CONTENT
+}
+
+#[cfg(unix)]
+pub fn send_signal(signal: libc::c_int) {
+    use libc::{getpid, kill};
+    info!("inform main thread to exit by sending signal {}.", signal);
+
+    unsafe {
+        assert_eq!(kill(getpid(), signal), 0);
+    }
+}
+// shutdown:1 ends here
+
+// wait job
+
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*wait%20job][wait job:1]]
+/// GET /jobs/:id
+fn wait_job(id: u64, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+    info!("wait_job: id={}", id);
+
+    let mut jobs = db.lock().unwrap();
+    if let Some(i) = jobs.iter().position(|j| j.id == id) {
+        jobs[i].wait();
+        // respond with a `204 No Content`, which means successful,
+        // yet no body expected...
+        Ok(warp::http::StatusCode::NO_CONTENT)
+    } else {
+        debug!("    -> job id not found!");
+        // Reject this request with a `404 Not Found`...
+        Err(warp::reject::not_found())
+    }
+}
+// wait job:1 ends here
+
 // core
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*core][core:1]]
@@ -361,8 +505,8 @@ pub fn run() {
 
     // Turn our "state", our db, into a Filter so we can combine it
     // easily with others...
-    let db = Arc::new(Mutex::new(Vec::<Job>::new()));
-    let db = warp::any().map(move || db.clone());
+    let db_raw = Arc::new(Mutex::new(Vec::<Job>::new()));
+    let db = warp::any().map(move || db_raw.clone());
 
     // Just the path segment "jobs"...
     let jobs = warp::path("jobs");
@@ -390,6 +534,12 @@ pub fn run() {
     // `GET /jobs`
     let list = warp::get2().and(jobs_index).and(db.clone()).map(list_jobs);
 
+    // `DELETE /jobs`
+    let shutdown = warp::delete2()
+        .and(jobs_index)
+        .and(db.clone())
+        .map(shutdown_server);
+
     // `POST /jobs`
     let create = warp::post2()
         .and(jobs_index)
@@ -416,6 +566,12 @@ pub fn run() {
         .and(db.clone())
         .and_then(list_job_files);
 
+    // `GET /jobs/:id`
+    let wait = warp::get2()
+        .and(job_id)
+        .and(db.clone())
+        .and_then(wait_job);
+
     // `GET` /jobs/:id/files/:file
     let get_file = warp::get2()
         .and(job_file)
@@ -429,18 +585,13 @@ pub fn run() {
         .and(warp::body::concat())
         .and_then(put_job_file);
 
-    // let put_file = warp::put2()
-    //     .and(job_file)
-    //     .and(db.clone())
-    //     .and(warp::header::<String>("Content-Type"))
-    //     .and(warp::body::concat())
-    //     .and_then(put_job_file);
-
     // Combine our endpoints, since we want requests to match any of them:
     let api = list
         .or(create)
         .or(update)
         .or(delete)
+        .or(wait)
+        .or(shutdown)
         .or(list_dir)
         .or(get_file)
         .or(put_file);
@@ -456,7 +607,7 @@ pub fn run() {
     let sig = tokio_signal::ctrl_c()
         .flatten_stream()
         .into_future()
-        .map(|_| {
+        .map(move |_| {
             println!("User interrupted.");
             let _ = tx.send(());
         });

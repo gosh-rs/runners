@@ -31,7 +31,6 @@ impl Default for Client {
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*core][core:1]]
 impl Client {
     pub fn server_address(&self) -> &str {
-        // self.server_addr.to_owned()
         self.server_addr.as_ref()
     }
 
@@ -44,10 +43,31 @@ impl Client {
         Ok(())
     }
 
+    /// Wait job to be done.
+    pub fn wait_job(&self, id: u64) -> Result<()> {
+        let url = format!("{}/jobs/{}", self.server_addr, id);
+
+        // NOTE: the default request timeout is 30 seconds. Here we disable
+        // timeout using reqwest builder.
+        //
+        // let new = reqwest::Client::new().get(&url).send()?;
+        let new = reqwest::Client::builder()
+            // .timeout(Duration::from_millis(500))
+            .timeout(None)
+            .build()
+            .unwrap()
+            .get(&url)
+            .send()?;
+
+        dbg!(new);
+
+        Ok(())
+    }
+
     /// Request server to create a job.
-    pub fn create_job(&self, id: u64) -> Result<()> {
+    pub fn create_job(&self, id: u64, script: &str) -> Result<()> {
         let url = format!("{}/jobs/", self.server_addr);
-        let job = Job::new(id);
+        let job = Job::new(id, script);
         let new = reqwest::Client::new().post(&url).json(&job).send()?;
         dbg!(new);
 
@@ -102,6 +122,16 @@ impl Client {
         } else {
             bail!("{}: not a file!", path.display());
         }
+
+        Ok(())
+    }
+
+    /// Shutdown app server. This will kill all running processes and remove all
+    /// job files.
+    pub fn shutdown_server(&self) -> Result<()> {
+        let url = format!("{}/jobs", self.server_addr);
+        let new = reqwest::Client::new().delete(&url).send()?;
+        dbg!(new);
 
         Ok(())
     }

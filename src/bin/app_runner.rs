@@ -29,7 +29,7 @@ impl Command {
 #[derive(StructOpt, Debug)]
 #[structopt(raw(setting = "structopt::clap::AppSettings::VersionlessSubcommands"))]
 pub enum Action {
-    /// Quit go shell.
+    /// Quit REPL shell.
     #[structopt(name = "quit", alias = "q", alias = "exit")]
     Quit {},
 
@@ -53,12 +53,24 @@ pub enum Action {
         id: u64,
     },
 
+    /// Wait until job is done.
+    #[structopt(name = "wait")]
+    Wait {
+        /// Job id
+        #[structopt(name = "JOB-ID")]
+        id: u64,
+    },
+
     /// Submit a job to the server.
     #[structopt(name = "submit", alias = "sub")]
     Submit {
         /// Job id
         #[structopt(name = "JOB-ID")]
         id: u64,
+
+        /// Set script file.
+        #[structopt(name = "SCRIPT-FILE", parse(from_os_str))]
+        script_file: PathBuf,
     },
 
     /// Download a job file from the server.
@@ -122,13 +134,22 @@ impl Command {
                     client.list_jobs()?;
                 }
             }
-            Action::Submit { id } => {
+            Action::Submit { id, script_file } => {
+                use std::io::Read;
+
                 let client = self.client()?;
-                client.create_job(*id)?;
+                let mut f = std::fs::File::open(script_file)?;
+                let mut buf = String::new();
+                let _ = f.read_to_string(&mut buf)?;
+                client.create_job(*id, &buf)?;
             }
             Action::Delete { id } => {
                 let client = self.client()?;
                 client.delete_job(*id)?;
+            }
+            Action::Wait { id } => {
+                let client = self.client()?;
+                client.wait_job(*id)?;
             }
             Action::Get { file_name, id } => {
                 let client = self.client()?;
@@ -138,6 +159,10 @@ impl Command {
                 let client = self.client()?;
                 client.put_job_file(*id, file_name)?;
             }
+            Action::Shutdown {} => {
+                let client = self.client()?;
+                client.shutdown_server()?;
+            }
             _ => {
                 eprintln!("not implemented yet.");
             }
@@ -146,12 +171,12 @@ impl Command {
         Ok(())
     }
 
-    // a quick wrapper
+    // a quick wrapper to extract client
     fn client(&mut self) -> Result<&mut Client> {
         if let Some(client) = self.client.as_mut() {
             Ok(client)
         } else {
-            bail!("not connected.");
+            bail!("App server not connected.");
         }
     }
 }
