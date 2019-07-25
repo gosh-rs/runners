@@ -6,7 +6,6 @@
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*lib.rs][lib.rs:1]]
 #![feature(async_await)]
 pub mod local;
-pub mod scratch;
 pub mod server;
 pub mod client;
 
