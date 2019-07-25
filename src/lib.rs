@@ -10,9 +10,6 @@ pub mod scratch;
 pub mod server;
 pub mod client;
 
-pub(crate) mod job;
-pub mod serv_warp;
-
 pub mod common {
     pub use quicli::prelude::*;
     pub use structopt::StructOpt;

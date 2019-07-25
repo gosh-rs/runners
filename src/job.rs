@@ -128,8 +128,4 @@ impl Job {
         }
     }
 }
-
-fn abs_path(dir: &PathBuf, file: &PathBuf) -> PathBuf {
-    dir.join(file)
-}
 // base:1 ends here

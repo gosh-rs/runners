@@ -4,14 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::*;
-use crate::serv_warp::Job;
+use crate::server::*;
 // imports:1 ends here
 
 // base
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
-const SERVER: &str = "http://localhost:3030";
-
 #[derive(Clone, Debug)]
 pub struct Client {
     server_addr: String,
@@ -20,8 +18,21 @@ pub struct Client {
 impl Default for Client {
     fn default() -> Self {
         Self {
-            server_addr: SERVER.into()
+            server_addr: format!("http://{}", DEFAULT_SERVER_ADDRESS),
         }
+    }
+}
+
+impl Client {
+    /// Create a client with specific server address.
+    pub fn new(addr: &str) -> Self {
+        let server_addr = if addr.starts_with("http://") {
+            addr.into()
+        } else {
+            format!("http://{}", addr)
+        };
+
+        Self { server_addr }
     }
 }
 // base:1 ends here
@@ -35,7 +46,7 @@ impl Client {
     }
 
     /// Request server to delete a job from queue.
-    pub fn delete_job(&self, id: u64) -> Result<()> {
+    pub fn delete_job(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}", self.server_addr, id);
         let new = reqwest::Client::new().delete(&url).send()?;
         dbg!(new);
@@ -44,7 +55,7 @@ impl Client {
     }
 
     /// Wait job to be done.
-    pub fn wait_job(&self, id: u64) -> Result<()> {
+    pub fn wait_job(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}", self.server_addr, id);
 
         // NOTE: the default request timeout is 30 seconds. Here we disable
@@ -65,9 +76,9 @@ impl Client {
     }
 
     /// Request server to create a job.
-    pub fn create_job(&self, id: u64, script: &str) -> Result<()> {
+    pub fn create_job(&self, script: &str) -> Result<()> {
         let url = format!("{}/jobs/", self.server_addr);
-        let job = Job::new(id, script);
+        let job = Job::new(script);
         let new = reqwest::Client::new().post(&url).json(&job).send()?;
         dbg!(new);
 
@@ -83,7 +94,7 @@ impl Client {
     }
 
     /// Request server to list files of specified job `id`.
-    pub fn list_job_files(&self, id: u64) -> Result<()> {
+    pub fn list_job_files(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}/files", self.server_addr, id);
         let x = reqwest::get(&url)?.text()?;
         dbg!(x);
@@ -91,7 +102,7 @@ impl Client {
     }
 
     /// Download a job file from the server.
-    pub fn get_job_file(&self, id: u64, fname: &str) -> Result<()> {
+    pub fn get_job_file(&self, id: JobId, fname: &str) -> Result<()> {
         let url = format!("{}/jobs/{}/files/{}", self.server_addr, id, fname);
         let mut resp = reqwest::get(&url)?;
         let mut f = std::fs::File::create(fname)?;
@@ -102,7 +113,7 @@ impl Client {
     }
 
     /// Upload a job file to the server.
-    pub fn put_job_file<P: AsRef<Path>>(&self, id: u64, path: P) -> Result<()> {
+    pub fn put_job_file<P: AsRef<Path>>(&self, id: JobId, path: P) -> Result<()> {
         use std::io::*;
 
         let path = path.as_ref();

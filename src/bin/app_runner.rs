@@ -7,6 +7,7 @@ use linefeed::{Interface, ReadResult};
 
 use runners::client::*;
 use runners::common::*;
+use runners::server::JobId;
 // imports:1 ends here
 
 // commands
@@ -42,7 +43,7 @@ pub enum Action {
     List {
         /// Job id
         #[structopt(name = "JOB-ID")]
-        id: Option<u64>,
+        id: Option<JobId>,
     },
 
     /// Request to delete a job from the server.
@@ -50,7 +51,7 @@ pub enum Action {
     Delete {
         /// Job id
         #[structopt(name = "JOB-ID")]
-        id: u64,
+        id: JobId,
     },
 
     /// Wait until job is done.
@@ -58,16 +59,12 @@ pub enum Action {
     Wait {
         /// Job id
         #[structopt(name = "JOB-ID")]
-        id: u64,
+        id: JobId,
     },
 
     /// Submit a job to the server.
     #[structopt(name = "submit", alias = "sub")]
     Submit {
-        /// Job id
-        #[structopt(name = "JOB-ID")]
-        id: u64,
-
         /// Set script file.
         #[structopt(name = "SCRIPT-FILE", parse(from_os_str))]
         script_file: PathBuf,
@@ -82,7 +79,7 @@ pub enum Action {
 
         /// Job id
         #[structopt(name = "JOB-ID", long = "id")]
-        id: u64,
+        id: JobId,
     },
 
     ///Shutdown the remote server.
@@ -98,7 +95,7 @@ pub enum Action {
 
         /// Job id
         #[structopt(name = "JOB-ID", long = "id")]
-        id: u64,
+        id: JobId,
     },
 
     /// Connect to app server.
@@ -118,13 +115,13 @@ impl Command {
     fn apply(&mut self, action: &Action) -> Result<()> {
         match action {
             Action::Connect { server_address } => {
-                if let Some(addr) = &server_address {
-                    unimplemented!()
+                let c = if let Some(addr) = &server_address {
+                    Client::new(addr)
                 } else {
-                    let c = Client::default();
-                    println!("connected to {}.", c.server_address());
-                    self.client = Some(c);
-                }
+                    Client::default()
+                };
+                println!("connected to {}.", c.server_address());
+                self.client = Some(c);
             }
             Action::List { id } => {
                 let client = self.client()?;
@@ -134,14 +131,14 @@ impl Command {
                     client.list_jobs()?;
                 }
             }
-            Action::Submit { id, script_file } => {
+            Action::Submit { script_file } => {
                 use std::io::Read;
 
                 let client = self.client()?;
                 let mut f = std::fs::File::open(script_file)?;
                 let mut buf = String::new();
                 let _ = f.read_to_string(&mut buf)?;
-                client.create_job(*id, &buf)?;
+                client.create_job(&buf)?;
             }
             Action::Delete { id } => {
                 let client = self.client()?;
