@@ -5,9 +5,11 @@
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*lib.rs][lib.rs:1]]
 #![feature(async_await)]
+pub mod client;
 pub mod local;
 pub mod server;
-pub mod client;
+
+mod session;
 
 pub mod common {
     pub use quicli::prelude::*;

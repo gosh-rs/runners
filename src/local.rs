@@ -13,11 +13,15 @@ use crate::common::*;
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*runner][runner:1]]
 /// A local runner that can make graceful exit
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Debug, Default)]
 pub struct Runner {
     /// The program to be run.
     #[structopt(name = "program", parse(from_os_str))]
     program: PathBuf,
+
+    /// Input stream in stdin.
+    #[structopt(long = "input")]
+    input: Option<String>,
 
     /// Job timeout in seconds
     #[structopt(long = "timeout", short = "t")]
@@ -37,20 +41,25 @@ impl Runner {
     pub fn new<P: AsRef<Path>>(program: P) -> Self {
         Self {
             program: program.as_ref().into(),
-            rest: vec![],
-            timeout: None,
+            ..Default::default()
         }
     }
 
     /// Set program argument
-    pub fn with_arg<S: AsRef<str>>(mut self, arg: S) -> Self {
+    pub fn arg<S: AsRef<str>>(mut self, arg: S) -> Self {
         self.rest.push(arg.as_ref().into());
         self
     }
 
     /// Set runner timeout
-    pub fn with_timeout(mut self, t: u64) -> Self {
+    pub fn timeout(mut self, t: u64) -> Self {
         self.timeout = Some(t);
+        self
+    }
+
+    /// Set runner input
+    pub fn input(mut self, inp: String) -> Self {
+        self.input = Some(inp);
         self
     }
 
@@ -70,7 +79,7 @@ use tokio::prelude::*;
 use tokio_process::CommandExt;
 use tokio_signal::unix::{Signal, SIGINT, SIGTERM};
 
-pub fn run(args: &Runner) -> Result<()> {
+pub(crate) fn run(args: &Runner) -> Result<()> {
     // show program status
     let app_name = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),);
     println!("{} starts at {}", app_name, timestamp_now());
@@ -104,12 +113,12 @@ pub fn run(args: &Runner) -> Result<()> {
         .for_each(move |_| {
             println!("User interrupted.");
             println!("Kill running processes ({}) ... ", session_id);
-            terminate_session(session_id).unwrap();
+            kill_session(session_id).unwrap();
             Ok(())
         })
         .map_err(move |_| {
             error!("Command timeout after {} seconds!", t);
-            terminate_session(session_id).unwrap();
+            kill_session(session_id).unwrap();
         });
 
     let cmd = child
@@ -159,7 +168,8 @@ pub fn terminate_session(sid: u32) -> Result<()> {
 
 /// Kill processes in a session.
 pub fn kill_session(sid: u32) -> Result<()> {
-    signal_processes_by_session_id(sid, "SIGKILL")
+    // signal_processes_by_session_id(sid, "SIGKILL")
+    kill_child_processes_by_session_id(sid)
 }
 
 /// Resume processes in a session.
@@ -188,4 +198,210 @@ fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Find child processes using psutil (without using shell commands)
+///
+/// # Reference
+///
+/// https://github.com/borntyping/rust-psutil/blob/master/examples/ps.rs
+fn kill_child_processes_by_session_id(sid: u32) -> Result<()> {
+    if let Ok(processes) = psutil::process::all() {
+        // collect pids then kill
+        let child_processes: Vec<_> = processes
+            .into_iter()
+            .filter(|p| p.session == sid as i32)
+            .inspect(|p| {
+                dbg!(p.session);
+            })
+            .collect();
+
+        for p in child_processes {
+            p.kill()?;
+        }
+    }
+    Ok(())
+}
 // utils:1 ends here
+
+// crossbeam/bbm/adhoc
+// : signal-hook = {version = "0.1", features = ["tokio-support"] }
+
+// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*crossbeam/bbm/adhoc][crossbeam/bbm/adhoc:1]]
+// FIXME: adhoc hacking
+pub use self::adhoc::*;
+
+mod adhoc {
+    use super::*;
+
+    use crossbeam_channel as cbchan;
+    use signal_hook::{iterator::Signals, SIGCONT, SIGINT, SIGTERM, SIGUSR1};
+
+    /// for cmd channel
+    enum CmdResult {
+        Pid(u32),
+        Output(String),
+    }
+
+    pub fn run_adhoc_input_output<P: AsRef<Path>>(
+        args: &Runner,
+        input: &str,
+        current_dir: P,
+    ) -> Result<String> {
+        let signal_events = signal_channel()?;
+        let runcmd_events = runcmd_channel(
+            &args.program,
+            input,
+            args.rest.clone(),
+            current_dir.as_ref(),
+        )?;
+
+        // timeout control
+        let duration = if let Some(t) = args.timeout {
+            Some(Duration::from_secs(t))
+        } else {
+            None
+        };
+
+        // Create a channel that times out after the specified duration.
+        let timeout = duration
+            .map(|d| cbchan::after(d))
+            .unwrap_or(cbchan::never());
+
+        // user interruption
+        let mut kill = false;
+        let mut session_id = 0;
+        eprintln!("Press Ctrl-C to stop ...");
+        let mut cmd_output = String::new();
+        loop {
+            cbchan::select! {
+                recv(signal_events) -> sig => {
+                    match sig {
+                        Ok(SIGINT) | Ok(SIGTERM) => {
+                            eprintln!("Try to gracefully exit ...");
+                            kill = true;
+                            break;
+                        }
+                        Ok(SIGCONT) => {
+                            eprintln!("Resume calculation ... {:?}", sig);
+                            if session_id > 0 {
+                                resume_session(session_id)?;
+                            } else {
+                                error!("Calculation not start yet.");
+                            }
+                        }
+                        Ok(SIGUSR1) => {
+                            eprintln!("Pause calculation ... {:?}", sig);
+                            if session_id > 0 {
+                                pause_session(session_id)?;
+                            } else {
+                                error!("Calculation not start yet.");
+                            }
+                        }
+                        Ok(sig) => {
+                            warn!("unprocessed signal {:?}", sig);
+                        }
+                        Err(e) => {
+                            eprintln!("Process signal hook failed: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+                recv(runcmd_events) -> msg => {
+                    match msg {
+                        Ok(CmdResult::Output(o)) => {
+                            eprintln!("Job completed.");
+                            kill = false;
+                            cmd_output = o;
+                            break;
+                        }
+                        Ok(CmdResult::Pid(pid)) => {
+                            info!("script session id: {}", pid);
+                            session_id = pid;
+                        }
+                        Err(e) => {
+                            error!("found error: {}", e);
+                        }
+                        _ => unreachable!()
+                    }
+                }
+                recv(timeout) -> _ => {
+                    eprintln!("Job reaches timeout ...");
+                    kill = true;
+                    break;
+                },
+            }
+        }
+
+        if kill {
+            eprintln!("Kill running processes ... ");
+            if session_id > 0 {
+                kill_session(session_id)?;
+            } else {
+                kill_child_processes()?;
+            }
+        }
+
+        Ok(cmd_output)
+    }
+
+    fn signal_channel() -> Result<cbchan::Receiver<i32>> {
+        let signals = Signals::new(&[SIGINT, SIGCONT, SIGTERM, SIGUSR1])?;
+
+        let (sender, receiver) = cbchan::bounded(1);
+
+        std::thread::spawn(move || {
+            for sig in signals.forever() {
+                let _ = sender.send(sig);
+            }
+        });
+
+        Ok(receiver)
+    }
+
+    fn runcmd_channel(
+        fscript: &PathBuf,
+        input: &str,
+        cmd_args: Vec<String>,
+        current_dir: &Path,
+    ) -> Result<cbchan::Receiver<CmdResult>> {
+        let (sender, receiver) = cbchan::bounded(1);
+
+        let p = format!("{}", fscript.display());
+        let input = input.to_owned();
+        let cdir = current_dir.to_owned();
+        std::thread::spawn(move || {
+            let mut child = process::Command::new("setsid")
+                .arg("-w")
+                .arg(p)
+                .args(cmd_args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .current_dir(cdir)
+                .spawn()
+                .expect("failed to execute child");
+
+            let pid = child.id();
+            info!("Job session id: {}", pid);
+            let _ = sender.send(CmdResult::Pid(pid));
+
+            {
+                let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+                stdin
+                    .write_all(input.as_bytes())
+                    .expect("Failed to write to stdin");
+            }
+
+            let p_output = child.wait_with_output().expect("Failed to read stdout");
+            let output = String::from_utf8_lossy(&p_output.stdout);
+            let ecode = p_output.status;
+            if !ecode.success() {
+                error!("program exits with failure!");
+                dbg!(ecode);
+            }
+            let _ = sender.send(CmdResult::Output(output.to_string()));
+        });
+
+        Ok(receiver)
+    }
+}
+// crossbeam/bbm/adhoc:1 ends here
