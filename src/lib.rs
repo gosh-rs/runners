@@ -1,19 +1,15 @@
-// lib.rs
-// :PROPERTIES:
-// :header-args: :tangle src/lib.rs
-// :END:
+// #![feature(async_await)]
 
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*lib.rs][lib.rs:1]]
-#![feature(async_await)]
-pub mod client;
-pub mod local;
-pub mod server;
-pub mod session;
+// pub mod local;
+// pub mod client;
+// pub mod server;
+// pub mod session;
 
-pub mod common {
-    pub use quicli::prelude::*;
+pub(crate) mod common {
+    pub use gosh_core::*;
+
+    pub use gut::prelude::*;
     pub use structopt::StructOpt;
-    pub type Result<T> = ::std::result::Result<T, Error>;
 
     /// Return current timestamp string
     pub fn timestamp_now() -> String {
@@ -22,4 +18,3 @@ pub mod common {
         format!("{}", now)
     }
 }
-// lib.rs:1 ends here
