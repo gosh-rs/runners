@@ -10,58 +10,82 @@ use crate::common::*;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-pub(crate) struct Session {
+pub struct Session {
     /// Session ID
-    sid: u32,
-    /// Child process. The process might be removed prematurely, in which case we do not kill
-    /// anything
-    child: std::process::Child,
+    sid: Option<u32>,
+
+    /// Arguments that will be passed to `program`
+    rest: Vec<String>,
+
+    /// Job timeout in seconds
+    timeout: Option<u64>,
+
+    command: Command,
 }
 
 impl Session {
     /// Create a new session.
-    ///
-    /// # unsafe
-    ///
-    /// It is unsafe to put any arbitrary child process into a process guard,
-    /// mainly because the guard relies on the child not having been waited on
-    /// beforehand. Otherwise, it cannot be guaranteed that the child process
-    /// has not exited and its PID been reused, potentially killing an innocent
-    /// bystander process on `Drop`.
-    pub unsafe fn new(mut cmd: Command) -> Self {
-        let child = cmd
-            // Don't check the error of setsid because it fails if we're the
-            // process leader already. We just forked so it shouldn't return
-            // error, but ignore it anyway.
-            .pre_exec(|| {
-                nix::unistd::setsid().ok();
-                Ok(())
-            })
-            .spawn()
-            .unwrap();
-
-        let sid = child.id();
-        Self { sid, child }
+    pub fn new(program: &str) -> Self {
+        let mut command = Command::new("setsid");
+        command.arg("-w").arg(program);
+        Self {
+            command,
+            sid: None,
+            timeout: None,
+            rest: vec![],
+        }
     }
 
-    /// terminate child processes in a session.
-    pub fn terminate(&self) -> Result<()> {
-        signal_processes_by_session_id(self.sid, "SIGTERM")
+    /// Set program argument
+    pub fn arg<S: AsRef<str>>(mut self, arg: S) -> Self {
+        self.command.arg(arg.as_ref());
+        self
+    }
+
+    /// Return a mutable reference to internal `Command` struct.
+    pub(crate) fn command(&mut self) -> &mut Command {
+        &mut self.command
+    }
+
+    /// A wrapper of std spawn method for saving session id.
+    pub fn spawn(&mut self) -> Result<std::process::Child> {
+        let child = self.command.spawn()?;
+        self.sid = Some(child.id());
+        Ok(child)
+    }
+
+    /// Set program running timeout.
+    pub fn timeout(mut self, t: u64) -> Self {
+        self.timeout = Some(t);
+        self
+    }
+
+    /// Terminate child processes in a session.
+    pub fn terminate(&mut self) -> Result<()> {
+        self.signal("SIGTERM")
     }
 
     /// Kill processes in a session.
-    pub fn kill(&self) -> Result<()> {
-        signal_processes_by_session_id(self.sid, "SIGKILL")
+    pub fn kill(&mut self) -> Result<()> {
+        self.signal("SIGKILL")
     }
 
     /// Resume processes in a session.
-    pub fn resume(&self) -> Result<()> {
-        signal_processes_by_session_id(self.sid, "SIGCONT")
+    pub fn resume(&mut self) -> Result<()> {
+        self.signal("SIGCONT")
     }
 
     /// Pause processes in a session.
-    pub fn pause(&self) -> Result<()> {
-        signal_processes_by_session_id(self.sid, "SIGSTOP")
+    pub fn pause(&mut self) -> Result<()> {
+        self.signal("SIGSTOP")
+    }
+
+    /// send signal to child processes
+    fn signal(&mut self, sig: &str) -> Result<()> {
+        if let Some(sid) = self.sid {
+            signal_processes_by_session_id(sid, sig)?;
+        }
+        Ok(())
     }
 }
 // base:1 ends here
@@ -81,8 +105,6 @@ impl Drop for Session {
 // impl based on psutil and nix crates.
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*impl/psutil][impl/psutil:1]]
-use duct::cmd;
-
 /// Signal child processes by session id
 ///
 /// Note: currently, psutil has no API for kill with signal other than SIGKILL
@@ -98,9 +120,15 @@ pub(crate) fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<(
         _ => unimplemented!(),
     };
 
-    let child_pids = get_child_processes_by_session_id(sid)?;
-    for pid in child_pids {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal)?;
+    let child_processes = get_child_processes_by_session_id(sid)?;
+    for UniqueProcessId(pid, ctime) in child_processes {
+        // refresh process id from /proc before kill
+        if let Ok(process) = psutil::process::Process::new(pid) {
+            // check starttime to avoid re-used pid
+            if process.starttime == ctime {
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal)?;
+            }
+        }
     }
 
     Ok(())
@@ -111,20 +139,17 @@ pub(crate) fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<(
 /// # Reference
 ///
 /// https://github.com/borntyping/rust-psutil/blob/master/examples/ps.rs
-fn get_child_processes_by_session_id(sid: u32) -> Result<Vec<i32>> {
+fn get_child_processes_by_session_id(sid: u32) -> Result<Vec<UniqueProcessId>> {
     if let Ok(processes) = psutil::process::all() {
         // collect pids then kill
         let child_processes: Vec<_> = processes
             .into_iter()
             .filter_map(|p| {
                 if p.session == sid as i32 {
-                    Some(p.session)
+                    Some(UniqueProcessId(p.session, p.starttime))
                 } else {
                     None
                 }
-            })
-            .inspect(|p| {
-                dbg!(p);
             })
             .collect();
 
@@ -133,13 +158,12 @@ fn get_child_processes_by_session_id(sid: u32) -> Result<Vec<i32>> {
         Ok(vec![])
     }
 }
+
+struct UniqueProcessId(i32, f64);
 // impl/psutil:1 ends here
 
 // test
 
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*test][test:1]]
-#[test]
-fn test() {
-    //
-}
+
 // test:1 ends here

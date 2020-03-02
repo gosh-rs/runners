@@ -8,8 +8,7 @@
 pub mod client;
 pub mod local;
 pub mod server;
-
-mod session;
+pub mod session;
 
 pub mod common {
     pub use quicli::prelude::*;

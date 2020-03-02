@@ -136,6 +136,7 @@ pub(crate) fn run(args: &Runner) -> Result<()> {
 // [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*utils][utils:1]]
 use duct::cmd;
 
+// FIXME: remove
 /// kill child processes based on pstree cmd, which is not very reliable.
 fn kill_child_processes() -> Result<()> {
     let pid = format!("{}", process::id());
@@ -151,12 +152,12 @@ fn kill_child_processes() -> Result<()> {
     // remove main process id from process list
     sub_pids.remove(pid.as_str());
 
-    if !sub_pids.is_empty() {
-        cmd("kill", &sub_pids)
-            .unchecked()
-            .then(cmd!("pstree", "-pagTl", &pid))
-            .run()?;
-    }
+    // if !sub_pids.is_empty() {
+    //     cmd("kill", &sub_pids)
+    //         .unchecked()
+    //         .then(cmd!("pstree", "-pagTl", &pid))
+    //         .run()?;
+    // }
 
     Ok(())
 }
