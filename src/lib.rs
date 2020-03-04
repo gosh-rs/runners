@@ -1,9 +1,11 @@
-// #![feature(async_await)]
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*lib.rs][lib.rs:1]]
+mod process;
 
+//pub mod adhoc;
 // pub mod local;
 // pub mod client;
 // pub mod server;
-// pub mod session;
+pub mod session;
 
 pub(crate) mod common {
     pub use gosh_core::*;
@@ -18,3 +20,4 @@ pub(crate) mod common {
         format!("{}", now)
     }
 }
+// lib.rs:1 ends here
