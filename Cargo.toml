@@ -1,3 +1,4 @@
+# [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*cargo][cargo:1]]
 [package]
 name = "gosh-runner"
 version = "0.0.5"
@@ -11,7 +12,7 @@ chrono = "0.4"
 duct = "0.13"
 tempfile = "3.0"
 nix = "0.15"
-psutil = "1"
+psutil = "3"
 tokio = { version="0.2", features=["full"]}
 procspawn = "0.8"
 # futures = "0.1"
@@ -34,3 +35,4 @@ procspawn = "0.8"
 gosh-core = { version = ">=0.0.1" }
 
 [dev-dependencies]
+# cargo:1 ends here

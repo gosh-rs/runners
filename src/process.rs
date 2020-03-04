@@ -23,16 +23,17 @@ fn float_unix_timestamp_to_date_time(t: f64) -> DateTime<Utc> {
 // timestamp:1 ends here
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*unique process][unique process:1]]
-use chrono::*;
+use std::collections::HashSet;
+use std::time::Duration;
 
 #[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)]
-pub(crate) struct UniqueProcessId(i32, DateTime<Utc>);
+pub(crate) struct UniqueProcessId(u32, Duration);
 
 impl UniqueProcessId {
     /// construct from pid. return error if the process `pid` not alive.
-    fn from_pid(pid: i32) -> Result<Self> {
+    fn from_pid(pid: u32) -> Result<Self> {
         if let Ok(p) = psutil::process::Process::new(pid) {
-            if p.is_alive() {
+            if p.is_running() {
                 return Ok(Self::from_process(p));
             }
         }
@@ -41,33 +42,32 @@ impl UniqueProcessId {
 
     /// construct from psutil `Process` struct (1.x branch only)
     fn from_process(p: psutil::process::Process) -> Self {
-        let dt = float_unix_timestamp_to_date_time(p.starttime);
-        Self(p.pid, dt)
+        Self(p.pid(), p.create_time())
     }
 
-    /// for psutil
-    pub fn pid(&self) -> i32 {
+    /// Process Id
+    pub fn pid(&self) -> u32 {
         self.0
     }
 }
 // unique process:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*impl/psutil][impl/psutil:1]]
-use std::collections::HashSet;
-
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*impl/psutil/v3][impl/psutil/v3:1]]
 /// Find child processes using psutil (without using shell commands)
 ///
 /// # Reference
 ///
 /// https://github.com/borntyping/rust-psutil/blob/master/examples/ps.rs
-fn impl_get_child_processes_by_session_id(sid: u32) -> Result<HashSet<UniqueProcessId>> {
-    let processes = psutil::process::all().context("psutil all processes")?;
+fn get_child_processes_by_session_id(sid: u32) -> Result<HashSet<UniqueProcessId>> {
+    // for Process::procfs_stat method
+    use psutil::process::os::linux::ProcessExt;
 
-    // collect pids then kill
-    let child_processes = processes
+    let child_processes = psutil::process::pids()?
         .into_iter()
-        .filter_map(|p| {
-            if p.session == sid as i32 {
+        .filter_map(|pid| psutil::process::Process::new(pid).ok())
+        .filter_map(|p| p.procfs_stat().ok().map(|s| (p, s)))
+        .filter_map(|(p, s)| {
+            if s.session as u32 == sid {
                 Some(UniqueProcessId::from_process(p))
             } else {
                 None
@@ -83,8 +83,8 @@ fn impl_get_child_processes_by_session_id(sid: u32) -> Result<HashSet<UniqueProc
 /// Note: currently, psutil has no API for kill with signal other than SIGKILL
 ///
 fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
-    let signal = signal
-        .parse::<Signal>()
+    let signal: Signal = signal
+        .parse()
         .with_context(|| format!("invalid signal str: {}", signal))?;
 
     let child_processes = get_child_processes_by_session_id(sid)?;
@@ -102,7 +102,7 @@ fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
         let pid = child.pid();
         if let Ok(process) = UniqueProcessId::from_pid(pid) {
             if process == child {
-                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal)?;
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal)?;
                 debug!("process {} was killed", pid);
             } else {
                 warn!("process id {} was reused?", pid);
@@ -114,21 +114,12 @@ fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
 
     Ok(())
 }
-// impl/psutil:1 ends here
+// impl/psutil/v3:1 ends here
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*pub][pub:1]]
 /// Signal all child processes in session `sid`
 pub(crate) fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
     info!("killing session {} with signal {}", sid, signal);
     impl_signal_processes_by_session_id(sid, signal)
-}
-
-/// Find child processes in session `sid`
-///
-/// # Reference
-///
-/// https://github.com/borntyping/rust-psutil/blob/master/examples/ps.rs
-pub(crate) fn get_child_processes_by_session_id(sid: u32) -> Result<HashSet<UniqueProcessId>> {
-    impl_get_child_processes_by_session_id(sid)
 }
 // pub:1 ends here
