@@ -219,14 +219,17 @@ struct Runner {
     #[structopt(long = "timeout", short = "t")]
     timeout: Option<u32>,
 
+    #[structopt(flatten)]
+    verbose: gut::cli::Verbosity,
+
     /// Command line to call a program
-    #[structopt(raw = true)]
+    #[structopt(raw = true, required = true)]
     cmdline: Vec<String>,
 }
 
 pub fn enter_main() -> Result<()> {
-    gut::cli::setup_logger();
     let args = Runner::from_args();
+    args.verbose.setup_logger();
 
     let program = &args.cmdline[0];
     let rest = &args.cmdline[1..];
@@ -244,6 +247,8 @@ pub fn enter_main() -> Result<()> {
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*test][test:1]]
 #[test]
 fn test_tokio() -> Result<()> {
+    gut::cli::setup_logger_for_test();
+
     let mut session = Session::new("sleep").arg("10").timeout(1);
     session.run().ok();
 
