@@ -20,4 +20,6 @@ pub(crate) mod common {
         format!("{}", now)
     }
 }
+
+pub use session::Session;
 // lib.rs:1 ends here

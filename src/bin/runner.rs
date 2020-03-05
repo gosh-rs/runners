@@ -7,7 +7,6 @@ use structopt::StructOpt;
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*main][main:1]]
 fn main() -> Result<()> {
-    gosh_core::gut::cli::setup_logger();
     gosh_runner::session::enter_main();
 
     Ok(())

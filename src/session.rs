@@ -18,7 +18,7 @@ pub struct Session {
     rest: Vec<String>,
 
     /// Job timeout in seconds
-    timeout: Option<u64>,
+    timeout: Option<u32>,
 
     /// The external command
     command: Command,
@@ -47,19 +47,41 @@ impl Session {
         }
     }
 
+    /// Adds multiple arguments to pass to the program.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.command.args(args);
+        self
+    }
+
     /// Set program argument
     pub fn arg<S: AsRef<str>>(mut self, arg: S) -> Self {
         self.command.arg(arg.as_ref());
         self
     }
 
-    /// Return a mutable reference to internal `Command` struct.
-    pub(crate) fn command(&mut self) -> &mut Command {
-        &mut self.command
+    /// Sets the working directory for the child process.
+    pub fn dir<P: AsRef<std::path::Path>>(mut self, dir: P) -> Self {
+        // FIXME: use absolute path?
+        self.command.current_dir(dir);
+        self
+    }
+
+    /// Inserts or updates an environment variable mapping.
+    pub fn env<K, V>(mut self, key: K, val: V) -> Self
+    where
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
+        self.command.env(key, val);
+        self
     }
 
     /// Set program running timeout.
-    pub fn timeout(mut self, t: u64) -> Self {
+    pub fn timeout(mut self, t: u32) -> Self {
         self.timeout = Some(t);
         self
     }
@@ -86,7 +108,7 @@ impl Session {
 
     /// Use bytes or a string as stdin
     /// A worker thread will write the input at runtime.
-    pub fn stdin_bytes<T: Into<Vec<u8>>>(&mut self, bytes: T) -> &mut Self {
+    pub fn stdin_bytes<T: Into<Vec<u8>>>(mut self, bytes: T) -> Self {
         self.stdin_bytes = bytes.into();
         self
     }
@@ -94,6 +116,8 @@ impl Session {
     /// send signal to child processes
     pub fn signal(&mut self, sig: &str) -> Result<()> {
         if let Some(sid) = self.sid {
+            // let out = duct::cmd!("pstree", "-p", format!("{}", sid)).read()?;
+            // dbg!(out);
             crate::process::signal_processes_by_session_id(sid, sig)?;
         } else {
             debug!("process not started yet");
@@ -106,39 +130,47 @@ impl Session {
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*core][core:1]]
 impl Session {
     async fn start(&mut self) -> Result<()> {
+        use std::process::Stdio;
+
         // pipe stdin_bytes to program's stdin
-        let mut child = self.command.stdin(std::process::Stdio::piped()).spawn()?;
+        let mut child = self
+            .command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
         self.sid = Some(child.id());
 
-        let mut stdin = child
+        child
             .stdin
             .take()
-            .expect("child did not have a handle to stdin");
-        stdin
+            .context("child did not have a handle to stdin")?
             .write_all(&self.stdin_bytes)
             .await
-            .expect("Failed to write to stdin");
+            .context("Failed to write to stdin")?;
 
-        let cmd_output = self.command.output();
+        let cmd_output = child.wait_with_output();
 
         // running timeout for 2 days
         let default_timeout = 3600 * 2;
-        let timeout = delay_for(Duration::from_secs(self.timeout.unwrap_or(default_timeout)));
+        let timeout = delay_for(Duration::from_secs(
+            self.timeout.unwrap_or(default_timeout) as u64
+        ));
         // user interruption
         let ctrl_c = tokio::signal::ctrl_c();
 
         let v: usize = loop {
             tokio::select! {
                 _ = timeout => {
-                    warn!("operation timed out");
+                    eprintln!("operation timed out");
                     break 1;
                 }
                 _ = ctrl_c => {
-                    warn!("user interruption");
+                    eprintln!("user interruption");
                     break 1;
                 }
                 o = cmd_output => {
-                    info!("operation completed");
+                    println!("operation completed");
                     match o {
                         Ok(o) => {
                             self.cmd_output = Some(o);
@@ -153,7 +185,7 @@ impl Session {
         };
 
         if v == 1 {
-            info!("program running interrupted.");
+            info!("program was interrupted.");
             self.kill()?;
         } else {
             info!("checking orphaned processes ...");
@@ -168,7 +200,7 @@ impl Session {
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*pub][pub:1]]
 impl Session {
     /// Run command with session manager.
-    pub fn run(&mut self) -> Result<std::process::Output> {
+    pub fn run(mut self) -> Result<std::process::Output> {
         let mut rt = tokio::runtime::Runtime::new().context("tokio runtime failure")?;
         rt.block_on(self.start())?;
 
@@ -183,33 +215,37 @@ use structopt::*;
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug, Default)]
 struct Runner {
-    /// The program to be run.
-    #[structopt(name = "program")]
-    program: String,
-
-    /// Job timeout in seconds
+    /// Job timeout in seconds. The default timeout is 30 days.
     #[structopt(long = "timeout", short = "t")]
-    timeout: Option<u64>,
+    timeout: Option<u32>,
 
-    /// Arguments that will be passed to `program`
+    /// Command line to call a program
     #[structopt(raw = true)]
-    rest: Vec<String>,
+    cmdline: Vec<String>,
 }
 
-pub fn enter_main() {
+pub fn enter_main() -> Result<()> {
+    gut::cli::setup_logger();
     let args = Runner::from_args();
 
-    let mut session = Session::new(&args.program).timeout(args.timeout.unwrap_or(50));
-    let o = session.run();
+    let program = &args.cmdline[0];
+    let rest = &args.cmdline[1..];
+
+    let o = Session::new(program)
+        .args(rest)
+        .timeout(args.timeout.unwrap_or(3600 * 24 * 30))
+        .run()?;
     dbg!(o);
+
+    Ok(())
 }
 // cli:1 ends here
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*test][test:1]]
 #[test]
 fn test_tokio() -> Result<()> {
-    let mut session = Session::new("sleep").arg("10").timeout(2);
-    session.run()?;
+    let mut session = Session::new("sleep").arg("10").timeout(1);
+    session.run().ok();
 
     Ok(())
 }

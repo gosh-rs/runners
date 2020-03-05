@@ -14,7 +14,7 @@ tempfile = "3.0"
 nix = "0.15"
 psutil = "3"
 tokio = { version="0.2", features=["full"]}
-procspawn = "0.8"
+# procspawn = "0.8"
 # futures = "0.1"
 # bytes = "0.4"
 # tokio-signal = "0.2"
@@ -32,7 +32,7 @@ procspawn = "0.8"
 # rocket = "0.4"
 # mpi = { git = "https://github.com/bsteinb/rsmpi", rev = "f9aec8b8d82" }
 # mpi = "0.5"
-gosh-core = { version = ">=0.0.1" }
+gosh-core = { version = ">=0.0.2" }
 
 [dev-dependencies]
 # cargo:1 ends here
