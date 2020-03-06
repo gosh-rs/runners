@@ -7,7 +7,7 @@ use structopt::StructOpt;
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*main][main:1]]
 fn main() -> Result<()> {
-    gosh_runner::session::enter_main();
+    gosh_runner::local::Runner::enter_main();
 
     Ok(())
 }

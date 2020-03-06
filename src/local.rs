@@ -1,154 +1,220 @@
-use std::path::{Path, PathBuf};
-use std::process;
-use std::time::Duration;
-use structopt::StructOpt;
-
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*imports][imports:1]]
 use crate::common::*;
 
-/// A local runner that can make graceful exit
-#[derive(StructOpt, Debug, Default)]
-pub struct Runner {
-    /// The program to be run.
-    #[structopt(name = "program", parse(from_os_str))]
-    program: PathBuf,
+use tokio::prelude::*;
+use tokio::process::Command;
+use tokio::signal::ctrl_c;
+use tokio::time::{delay_for, Duration};
+// imports:1 ends here
 
-    /// Input stream in stdin.
-    #[structopt(long = "input")]
-    input: Option<String>,
-
-    /// Job timeout in seconds
-    #[structopt(long = "timeout", short = "t")]
-    timeout: Option<u64>,
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*base][base:1]]
+/// Manage process session
+#[derive(Debug)]
+pub struct Session {
+    /// Session ID
+    sid: Option<u32>,
 
     /// Arguments that will be passed to `program`
-    #[structopt(raw = true)]
     rest: Vec<String>,
+
+    /// Job timeout in seconds
+    timeout: Option<u32>,
+
+    /// The external command
+    command: Command,
 }
 
-impl Runner {
-    /// Run program
-    pub fn run(&self) -> Result<()> {
-        run(&self)
+impl Session {
+    /// Create a new session.
+    pub fn new(program: &str) -> Self {
+        // setsid -w external-cmd
+        let mut command = Command::new("setsid");
+        // do not kill command when `Child` drop
+        command.arg("-w").arg(program).kill_on_drop(false);
+
+        Self {
+            command,
+            sid: None,
+            timeout: None,
+            rest: vec![],
+        }
     }
 
-    pub fn new<P: AsRef<Path>>(program: P) -> Self {
-        Self {
-            program: program.as_ref().into(),
-            ..Default::default()
-        }
+    /// Adds multiple arguments to pass to the program.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.command.args(args);
+        self
     }
 
     /// Set program argument
     pub fn arg<S: AsRef<str>>(mut self, arg: S) -> Self {
-        self.rest.push(arg.as_ref().into());
+        self.command.arg(arg.as_ref());
         self
     }
 
-    /// Set runner timeout
-    pub fn timeout(mut self, t: u64) -> Self {
+    /// Sets the working directory for the child process.
+    pub fn dir<P: AsRef<std::path::Path>>(mut self, dir: P) -> Self {
+        // FIXME: use absolute path?
+        self.command.current_dir(dir);
+        self
+    }
+
+    /// Inserts or updates an environment variable mapping.
+    pub fn env<K, V>(mut self, key: K, val: V) -> Self
+    where
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
+        self.command.env(key, val);
+        self
+    }
+
+    /// Set program running timeout.
+    pub fn timeout(mut self, t: u32) -> Self {
         self.timeout = Some(t);
         self
     }
 
-    /// Set runner input
-    pub fn input(mut self, inp: String) -> Self {
-        self.input = Some(inp);
-        self
+    /// Terminate child processes in a session.
+    pub fn terminate(&mut self) -> Result<()> {
+        self.signal("SIGTERM")
     }
 
-    /// Spawn child process in a new session.
-    pub fn build_command(&self) -> std::process::Command {
-        let mut cmd = process::Command::new("setsid");
-        cmd.arg("-w").arg(&self.program).args(&self.rest);
-        cmd
-    }
-}
-
-use duct::cmd;
-
-// FIXME: remove
-/// kill child processes based on pstree cmd, which is not very reliable.
-fn kill_child_processes() -> Result<()> {
-    let pid = format!("{}", process::id());
-
-    // hide threads using -T option
-    let output = cmd!("pstree", "-plT", &pid)
-        .pipe(cmd!("grep", "([[:digit:]]*)", "-o"))
-        .pipe(cmd!("tr", "-d", "()"))
-        .read()?;
-
-    let mut sub_pids: std::collections::HashSet<_> = output.split_whitespace().collect();
-
-    // remove main process id from process list
-    sub_pids.remove(pid.as_str());
-
-    // if !sub_pids.is_empty() {
-    //     cmd("kill", &sub_pids)
-    //         .unchecked()
-    //         .then(cmd!("pstree", "-pagTl", &pid))
-    //         .run()?;
-    // }
-
-    Ok(())
-}
-
-/// terminate child processes in a session.
-pub fn terminate_session(sid: u32) -> Result<()> {
-    signal_processes_by_session_id(sid, "SIGTERM")
-}
-
-/// Kill processes in a session.
-pub fn kill_session(sid: u32) -> Result<()> {
-    // signal_processes_by_session_id(sid, "SIGKILL")
-    kill_child_processes_by_session_id(sid)
-}
-
-/// Resume processes in a session.
-pub fn resume_session(sid: u32) -> Result<()> {
-    signal_processes_by_session_id(sid, "SIGCONT")
-}
-
-/// Pause processes in a session.
-pub fn pause_session(sid: u32) -> Result<()> {
-    signal_processes_by_session_id(sid, "SIGSTOP")
-}
-
-/// signal processes by session id
-fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
-    // cmdline: kill -CONT -- $(ps -s $1 -o pid=)
-    let output = cmd!("ps", "-s", format!("{}", sid), "-o", "pid=").read()?;
-    let pids: Vec<_> = output.split_whitespace().collect();
-
-    let mut args = vec!["-s", signal, "--"];
-    args.extend(&pids);
-    if !pids.is_empty() {
-        cmd("kill", &args).unchecked().run()?;
-    } else {
-        info!("No remaining processes found!");
+    /// Kill processes in a session.
+    pub fn kill(&mut self) -> Result<()> {
+        self.signal("SIGKILL")
     }
 
-    Ok(())
-}
+    /// Resume processes in a session.
+    pub fn resume(&mut self) -> Result<()> {
+        self.signal("SIGCONT")
+    }
 
-/// Find child processes using psutil (without using shell commands)
-///
-/// # Reference
-///
-/// https://github.com/borntyping/rust-psutil/blob/master/examples/ps.rs
-fn kill_child_processes_by_session_id(sid: u32) -> Result<()> {
-    if let Ok(processes) = psutil::process::all() {
-        // collect pids then kill
-        let child_processes: Vec<_> = processes
-            .into_iter()
-            .filter(|p| p.session == sid as i32)
-            .inspect(|p| {
-                dbg!(p.session);
-            })
-            .collect();
+    /// Pause processes in a session.
+    pub fn pause(&mut self) -> Result<()> {
+        self.signal("SIGSTOP")
+    }
 
-        for p in child_processes {
-            p.kill()?;
+    /// send signal to child processes
+    pub fn signal(&mut self, sig: &str) -> Result<()> {
+        if let Some(sid) = self.sid {
+            // let out = duct::cmd!("pstree", "-p", format!("{}", sid)).read()?;
+            // dbg!(out);
+            crate::process::signal_processes_by_session_id(sid, sig)?;
+        } else {
+            debug!("process not started yet");
         }
+        Ok(())
     }
-    Ok(())
 }
+// base:1 ends here
+
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*core][core:1]]
+impl Session {
+    async fn start(&mut self) -> Result<()> {
+        let mut child = self.command.spawn()?;
+        self.sid = Some(child.id());
+        // Ensure we close any stdio handles so we can't deadlock
+        // waiting on the child which may be waiting to read/write
+        // to a pipe we're holding.
+        child.stdin.take();
+        child.stdout.take();
+        child.stderr.take();
+
+        // running timeout for 2 days
+        let default_timeout = 3600 * 2;
+        let timeout = delay_for(Duration::from_secs(
+            self.timeout.unwrap_or(default_timeout) as u64
+        ));
+        // user interruption
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        let v: usize = loop {
+            tokio::select! {
+                _ = timeout => {
+                    eprintln!("operation timed out");
+                    break 1;
+                }
+                _ = ctrl_c => {
+                    eprintln!("user interruption");
+                    break 1;
+                }
+                o = child => {
+                    println!("operation completed");
+                    match o {
+                        Ok(o) => {
+                            dbg!(o);
+                        }
+                        Err(e) => {
+                            error!("cmd error: {:?}", e);
+                        }
+                    }
+                    break 0;
+                }
+            }
+        };
+
+        if v == 1 {
+            info!("program was interrupted.");
+            self.kill()?;
+        } else {
+            info!("checking orphaned processes ...");
+            self.kill()?;
+        }
+
+        Ok(())
+    }
+}
+// core:1 ends here
+
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*pub][pub:1]]
+impl Session {
+    /// Run command with session manager.
+    pub fn run(mut self) -> Result<()> {
+        let mut rt = tokio::runtime::Runtime::new().context("tokio runtime failure")?;
+        rt.block_on(self.start())?;
+
+        Ok(())
+    }
+}
+// pub:1 ends here
+
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*cli][cli:1]]
+use structopt::*;
+
+/// A local runner that can make graceful exit
+#[derive(StructOpt, Debug, Default)]
+pub struct Runner {
+    /// Job timeout in seconds. The default timeout is 30 days.
+    #[structopt(long = "timeout", short = "t")]
+    timeout: Option<u32>,
+
+    #[structopt(flatten)]
+    verbose: gut::cli::Verbosity,
+
+    /// Command line to call a program
+    #[structopt(raw = true, required = true)]
+    cmdline: Vec<String>,
+}
+
+impl Runner {
+    pub fn enter_main() -> Result<()> {
+        let args = Runner::from_args();
+        args.verbose.setup_logger();
+
+        let program = &args.cmdline[0];
+        let rest = &args.cmdline[1..];
+
+        Session::new(program)
+            .args(rest)
+            .timeout(args.timeout.unwrap_or(3600 * 24 * 30))
+            .run()?;
+
+        Ok(())
+    }
+}
+// cli:1 ends here

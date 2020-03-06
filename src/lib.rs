@@ -2,10 +2,12 @@
 mod process;
 
 //pub mod adhoc;
-// pub mod local;
 // pub mod client;
 // pub mod server;
+pub mod local;
 pub mod session;
+
+pub use local::Runner;
 
 pub(crate) mod common {
     pub use gosh_core::*;
@@ -20,6 +22,4 @@ pub(crate) mod common {
         format!("{}", now)
     }
 }
-
-pub use session::Session;
 // lib.rs:1 ends here
