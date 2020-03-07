@@ -1,15 +1,11 @@
-// imports
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*imports][imports:1]]
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*imports][imports:1]]
 use std::path::{Path, PathBuf};
 
 use crate::common::*;
 use crate::server::*;
 // imports:1 ends here
 
-// base
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*base][base:1]]
 #[derive(Clone, Debug)]
 pub struct Client {
     server_addr: String,
@@ -37,9 +33,7 @@ impl Client {
 }
 // base:1 ends here
 
-// core
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*core][core:1]]
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*core][core:1]]
 impl Client {
     pub fn server_address(&self) -> &str {
         self.server_addr.as_ref()
@@ -48,7 +42,7 @@ impl Client {
     /// Request server to delete a job from queue.
     pub fn delete_job(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}", self.server_addr, id);
-        let new = reqwest::Client::new().delete(&url).send()?;
+        let new = reqwest::blocking::Client::new().delete(&url).send()?;
         dbg!(new);
 
         Ok(())
@@ -61,8 +55,7 @@ impl Client {
         // NOTE: the default request timeout is 30 seconds. Here we disable
         // timeout using reqwest builder.
         //
-        // let new = reqwest::Client::new().get(&url).send()?;
-        let new = reqwest::Client::builder()
+        let new = reqwest::blocking::Client::builder()
             // .timeout(Duration::from_millis(500))
             .timeout(None)
             .build()
@@ -79,7 +72,7 @@ impl Client {
     pub fn create_job(&self, script: &str) -> Result<()> {
         let url = format!("{}/jobs/", self.server_addr);
         let job = Job::new(script);
-        let new = reqwest::Client::new().post(&url).json(&job).send()?;
+        let new = reqwest::blocking::Client::new().post(&url).json(&job).send()?;
         dbg!(new);
 
         Ok(())
@@ -88,7 +81,7 @@ impl Client {
     /// Request server to list current jobs in queue.
     pub fn list_jobs(&self) -> Result<()> {
         let url = format!("{}/jobs", self.server_addr);
-        let x = reqwest::get(&url)?.text()?;
+        let x = reqwest::blocking::get(&url)?.text()?;
         dbg!(x);
         Ok(())
     }
@@ -96,7 +89,7 @@ impl Client {
     /// Request server to list files of specified job `id`.
     pub fn list_job_files(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}/files", self.server_addr, id);
-        let x = reqwest::get(&url)?.text()?;
+        let x = reqwest::blocking::get(&url)?.text()?;
         dbg!(x);
         Ok(())
     }
@@ -104,7 +97,7 @@ impl Client {
     /// Download a job file from the server.
     pub fn get_job_file(&self, id: JobId, fname: &str) -> Result<()> {
         let url = format!("{}/jobs/{}/files/{}", self.server_addr, id, fname);
-        let mut resp = reqwest::get(&url)?;
+        let mut resp = reqwest::blocking::get(&url)?;
         let mut f = std::fs::File::create(fname)?;
         let m = resp.copy_to(&mut f)?;
         info!("copyed {} bytes.", m);
@@ -129,7 +122,7 @@ impl Client {
             f.read_to_end(&mut bytes)?;
 
             // send the raw bytes using PUT request
-            let res = reqwest::Client::new().put(&url).body(bytes).send()?;
+            let res = reqwest::blocking::Client::new().put(&url).body(bytes).send()?;
         } else {
             bail!("{}: not a file!", path.display());
         }
@@ -141,7 +134,7 @@ impl Client {
     /// job files.
     pub fn shutdown_server(&self) -> Result<()> {
         let url = format!("{}/jobs", self.server_addr);
-        let new = reqwest::Client::new().delete(&url).send()?;
+        let new = reqwest::blocking::Client::new().delete(&url).send()?;
         dbg!(new);
 
         Ok(())

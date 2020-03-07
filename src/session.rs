@@ -162,15 +162,15 @@ impl Session {
         let v: usize = loop {
             tokio::select! {
                 _ = timeout => {
-                    eprintln!("operation timed out");
+                    eprintln!("Program timed out");
                     break 1;
                 }
                 _ = ctrl_c => {
-                    eprintln!("user interruption");
+                    eprintln!("User interruption");
                     break 1;
                 }
                 o = cmd_output => {
-                    println!("operation completed");
+                    println!("Program completed");
                     match o {
                         Ok(o) => {
                             self.cmd_output = Some(o);

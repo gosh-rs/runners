@@ -1,7 +1,7 @@
-# [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*cargo][cargo:1]]
+# [[file:runners.note::*cargo][cargo:1]]
 [package]
 name = "gosh-runner"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2018"
 authors = ["Wenping Guo <ybyygu@gmail.com>"]
 
@@ -9,22 +9,19 @@ authors = ["Wenping Guo <ybyygu@gmail.com>"]
 serde = { version = "1.0", features = ["derive"] }
 structopt = "0.3"
 chrono = "0.4"
-duct = "0.13"
 tempfile = "3.0"
 nix = "0.15"
 psutil = "3"
 tokio = { version="0.2", features=["full"]}
+reqwest = { version="0.10", features=["json", "blocking"]}
+warp = "0.2"
+slab = "0.4"
+libc = "0.2"
+bytes = "0.5"
+linefeed = "0.6"
 # procspawn = "0.8"
 # futures = "0.1"
-# bytes = "0.4"
-# signal-hook = {version = "0.1", features = ["tokio-support"] }
-# crossbeam-channel = "0.3"
 # heim = "0.0.8"
-# warp = "0.1"
-# reqwest = "0.9"
-# linefeed = "0.6"
-# libc = "0.2"
-# slab = "0.4"
 # nails = {path = "../nails/nails" }
 # rain_task = "0.4"
 # rocket = "0.4"

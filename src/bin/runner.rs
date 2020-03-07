@@ -6,6 +6,8 @@ use structopt::StructOpt;
 // imports:1 ends here
 
 // [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*main][main:1]]
+use gosh_runner::local::Runner;
+
 use std::path::Path;
 use structopt::*;
 
@@ -17,17 +19,17 @@ fn main() -> Result<()> {
 
     // check file extension for sure (should be foo.run)
     // REVIEW: must be carefully here: not to enter infinite loop
-    match invoke_path.extension().and_then(|s| s.to_str()) {
+    if let Some("run") = invoke_path.extension().and_then(|s| s.to_str()) {
         // apply symlink magic
         // call the program that symlink pointing to
-        Some("run") => {
-            let invoke_exe = invoke_path.file_stem().context("invoke exe name")?;
+        let invoke_exe = invoke_path.file_stem().context("invoke exe name")?;
 
-            // The path to real executable binary
-            let real_path = std::env::current_exe().context("Failed to get exe path")?;
-            println!("Runner exe path: {:?}", real_path);
-            let real_exe = real_path.file_name().context("real exe name")?;
+        // The path to real executable binary
+        let real_path = std::env::current_exe().context("Failed to get exe path")?;
+        println!("Runner exe path: {:?}", real_path);
+        let real_exe = real_path.file_name().context("real exe name")?;
 
+        if real_exe != invoke_exe {
             let runner_args = [
                 &real_exe.to_string_lossy(),
                 "-v",
@@ -40,13 +42,15 @@ fn main() -> Result<()> {
                 .map(|s| s.to_string())
                 .chain(args.iter().cloned().skip(1))
                 .collect();
-            println!("runner will call {:?} with {:?}", invoke_exe, cmdline.join(" "));
-            assert_ne!(invoke_exe, real_exe);
-
-            gosh_runner::Runner::enter_main(cmdline)
+            println!(
+                "runner will call {:?} with {:?}",
+                invoke_exe,
+                cmdline.join(" ")
+            );
+            return Runner::enter_main(cmdline);
         }
-        // run in a normal way
-        _ => gosh_runner::Runner::enter_main(std::env::args()),
     }
+    // run in a normal way
+    Runner::enter_main(std::env::args())
 }
 // main:1 ends here
