@@ -1,11 +1,17 @@
-// #![feature(async_await)]
+// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*lib.rs][lib.rs:1]]
+mod process;
 
-pub mod local;
+//pub mod adhoc;
 // pub mod client;
 // pub mod server;
-// pub mod session;
+pub mod local;
+pub mod session;
+
+pub use local::Runner;
 
 pub(crate) mod common {
+    pub use gosh_core::*;
+
     pub use gut::prelude::*;
     pub use structopt::StructOpt;
 

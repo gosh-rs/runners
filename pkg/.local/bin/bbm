@@ -1,0 +1,4 @@
+#! /usr/bin/env bash
+# [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*bbm][bbm:1]]
+runner -v -- bbmrun -v $*
+# bbm:1 ends here
