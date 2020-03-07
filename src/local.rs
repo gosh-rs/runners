@@ -189,12 +189,12 @@ use structopt::*;
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug, Default)]
 pub struct Runner {
+    #[structopt(flatten)]
+    verbose: gut::cli::Verbosity,
+
     /// Job timeout in seconds. The default timeout is 30 days.
     #[structopt(long = "timeout", short = "t")]
     timeout: Option<u32>,
-
-    #[structopt(flatten)]
-    verbose: gut::cli::Verbosity,
 
     /// Command line to call a program
     #[structopt(raw = true, required = true)]
@@ -202,8 +202,13 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn enter_main() -> Result<()> {
-        let args = Runner::from_args();
+    pub fn enter_main<I>(iter: I) -> Result<()>
+    where
+        Self: Sized,
+        I: IntoIterator,
+        I::Item: Into<std::ffi::OsString> + Clone,
+    {
+        let args = Runner::from_iter_safe(iter)?;
         args.verbose.setup_logger();
 
         let program = &args.cmdline[0];
