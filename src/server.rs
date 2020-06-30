@@ -1,25 +1,19 @@
-// imports
+// [[file:../runners.note::*imports][imports:1]]
+// #![deny(warnings)]
 
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*imports][imports:1]]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tempfile::{tempdir, tempdir_in, TempDir};
 use tokio::prelude::*;
 
-use quicli::prelude::*;
-//use crate::common::*;
+use crate::common::*;
 // imports:1 ends here
 
-// base
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
+// [[file:../runners.note::*base/job][base/job:1]]
 pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:3030";
-// base:1 ends here
 
-// job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*job][job:1]]
 #[derive(Clone, Debug)]
 enum JobStatus {
     NotStarted,
@@ -59,9 +53,59 @@ pub struct Job {
 
     // command session
     #[serde(skip)]
-    session: Option<tokio_process::Child>,
+    session: Option<tokio::process::Child>,
+}
+// base/job:1 ends here
+
+// [[file:../runners.note::*base/db][base/db:1]]
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+// type Jobs = Vec<Job>;
+type Jobs = slab::Slab<Job>;
+
+/// So we don't have to tackle how different database work, we'll just use
+/// a simple in-memory DB, a vector synchronized by a mutex.
+type Db = Arc<Mutex<Jobs>>;
+
+fn blank_db() -> Db {
+    Arc::new(Mutex::new(Jobs::new()))
+}
+// base/db:1 ends here
+
+// [[file:../runners.note::*base/server][base/server:1]]
+use std::net::{SocketAddr, ToSocketAddrs};
+
+/// Computation server.
+pub struct Server {
+    address: SocketAddr,
 }
 
+impl Server {
+    fn new(addr: &str) -> Self {
+        let addrs: Vec<_> = addr.to_socket_addrs().expect("bad address").collect();
+
+        dbg!(&addrs);
+        match addrs.len() {
+            0 => {
+                panic!("no valid server address!");
+            }
+            1 => Self { address: addrs[0] },
+            _ => {
+                let ipv4addrs: Vec<_> = addrs.iter().filter(|a| a.is_ipv4()).collect();
+                if ipv4addrs.len() == 0 {
+                    panic!("no valid ipv4 address: {:?}", addrs);
+                } else {
+                    warn!("found multiple IPV4 addresses: {:?}", ipv4addrs);
+                    Self { address: *ipv4addrs[0] }
+                }
+            }
+        }
+    }
+}
+// base/server:1 ends here
+
+// [[file:../runners.note::*job][job:1]]
 impl Job {
     ///
     /// Construct a Job with shell script of job run_file.
@@ -127,9 +171,7 @@ impl Job {
 }
 // job:1 ends here
 
-// core
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*core][core:1]]
+// [[file:../runners.note::*core][core:1]]
 impl Job {
     /// Create runnable script file and stdin file from self.script and
     /// self.input.
@@ -171,78 +213,59 @@ impl Job {
         }
     }
 
-    /// Run command in background.
-    fn start(&mut self) {
-        use crate::local::Runner;
-
-        use tokio::prelude::*;
-        use tokio_process::CommandExt;
-
-        let wdir = self.wrk_dir();
-        info!("job work direcotry: {}", wdir.display());
-
-        let runner = Runner::new(&self.run_file());
-        let mut child = runner
-            .build_command()
-            .current_dir(wdir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn_async()
-            .expect("spawn command session");
-
-        let mut stdin = child
-            .stdin()
-            .take()
-            .expect("child did not have a handle to stdout");
-        let stdout = child
-            .stdout()
-            .take()
-            .expect("child did not have a handle to stdout");
-        let stderr = child
-            .stderr()
-            .take()
-            .expect("child did not have a handle to stderr");
-
-        // NOTE: suppose stdin stream is small.
-        stdin.write_all(self.input.as_bytes()).expect("write stdin");
-
-        // redirect stdout and stderr to files for user inspection.
-        let save_stdout = tokio::fs::File::create(self.out_file())
-            .and_then(move |f| tokio::io::copy(stdout, f))
-            .map(move |_| ())
-            .map_err(|e| panic!("error while saving stdout: {}", e));
-        let save_stderr = tokio::fs::File::create(self.err_file())
-            .and_then(move |f| tokio::io::copy(stderr, f))
-            .map(|_| ())
-            .map_err(|e| panic!("error while saving stderr: {}", e));
-
-        tokio::spawn(save_stderr);
-        tokio::spawn(save_stdout);
-
-        let sid = child.id();
-        info!("command running in session {}", sid);
-        self.session = Some(child);
+    /// Wait for background command to complete.
+    async fn wait(&mut self) {
+        if let Some(mut child) = self.session.take() {
+            child.wait_with_output().await;
+        } else {
+            error!("Job not started yet.");
+        }
     }
 
     /// Terminate background command session.
     fn terminate(&mut self) {
         if let Some(child) = &mut self.session {
             let sid = child.id();
-            crate::local::terminate_session(sid).expect("term session");
+            crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
             info!("Job with command session {} has been terminated.", sid);
         } else {
             debug!("Job not started yet.");
         }
     }
 
-    /// Wait for background command to complete.
-    fn wait(&mut self) {
-        if let Some(mut child) = self.session.take() {
-            child.wait_with_output().wait();
-        } else {
-            error!("Job not started yet.");
-        }
+    /// Run command in background.
+    async fn start(&mut self) -> Result<()> {
+        use tokio::prelude::*;
+
+        let wdir = self.wrk_dir();
+        info!("job work direcotry: {}", wdir.display());
+
+        let mut child = tokio::process::Command::new(&self.run_file())
+            .current_dir(wdir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn command session");
+
+        let mut stdin = child.stdin.take().expect("child did not have a handle to stdout");
+        let mut stdout = child.stdout.take().expect("child did not have a handle to stdout");
+        let mut stderr = child.stderr.take().expect("child did not have a handle to stderr");
+
+        // NOTE: suppose stdin stream is small.
+        stdin.write_all(self.input.as_bytes()).await;
+
+        // redirect stdout and stderr to files for user inspection.
+        let mut fout = tokio::fs::File::create(self.out_file()).await?;
+        let mut ferr = tokio::fs::File::create(self.err_file()).await?;
+        tokio::io::copy(&mut stdout, &mut fout).await?;
+        tokio::io::copy(&mut stderr, &mut ferr).await?;
+
+        let sid = child.id();
+        info!("command running in session {}", sid);
+        self.session = Some(child);
+
+        Ok(())
     }
 }
 
@@ -253,64 +276,15 @@ impl Drop for Job {
 }
 // core:1 ends here
 
-// imports
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*imports][imports:1]]
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
-use std::sync::Mutex;
-
+// [[file:../runners.note::*imports][imports:1]]
 use warp::*;
 // imports:1 ends here
 
-// base
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*base][base:1]]
-// type Jobs = Vec<Job>;
-type Jobs = slab::Slab<Job>;
-
-/// So we don't have to tackle how different database work, we'll just use
-/// a simple in-memory DB, a vector synchronized by a mutex.
-type Db = Arc<Mutex<Jobs>>;
-
-/// Computation server.
-pub struct Server {
-    address: SocketAddr,
-}
-
-impl Server {
-    fn new(addr: &str) -> Self {
-        let addrs: Vec<_> = addr.to_socket_addrs().expect("bad address").collect();
-
-        dbg!(&addrs);
-        match addrs.len() {
-            0 => {
-                panic!("no valid server address!");
-            }
-            1 => Self { address: addrs[0] },
-            _ => {
-                let ipv4addrs: Vec<_> = addrs.iter().filter(|a| a.is_ipv4()).collect();
-                if ipv4addrs.len() == 0 {
-                    panic!("no valid ipv4 address: {:?}", addrs);
-                } else {
-                    warn!("found multiple IPV4 addresses: {:?}", ipv4addrs);
-                    Self {
-                        address: *ipv4addrs[0],
-                    }
-                }
-            }
-        }
-    }
-}
-// base:1 ends here
-
-// create job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*create%20job][create job:1]]
+// [[file:../runners.note::*create job][create job:1]]
 /// POST /jobs with JSON body
-fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+async fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     info!("create_job: {:?}", create);
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
 
     // run command
     create.build();
@@ -323,13 +297,11 @@ fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejecti
 }
 // create job:1 ends here
 
-// delete job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*delete%20job][delete job:1]]
+// [[file:../runners.note::*delete job][delete job:1]]
 /// DELETE /jobs/:id
-fn delete_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+async fn delete_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     info!("delete_job: id={}", id);
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
 
     if jobs.contains(id) {
         let _ = jobs.remove(id);
@@ -345,13 +317,11 @@ fn delete_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
 }
 // delete job:1 ends here
 
-// update job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*update%20job][update job:1]]
+// [[file:../runners.note::*update job][update job:1]]
 /// PUT /jobs/:id with JSON body
-fn update_job(id: JobId, update: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+async fn update_job(id: JobId, update: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     debug!("update_job: id={}, job={:?}", id, update);
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
 
     // Look for the specified Job...
     if jobs.contains(id) {
@@ -365,24 +335,22 @@ fn update_job(id: JobId, update: Job, db: Db) -> Result<impl warp::Reply, warp::
 }
 // update job:1 ends here
 
-// list job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*list%20job][list job:1]]
+// [[file:../runners.note::*list job][list job:1]]
 /// List jobs in queue
 ///
 /// GET /jobs
-fn list_jobs(db: Db) -> impl warp::Reply {
+async fn list_jobs(db: Db) -> Result<impl warp::Reply, std::convert::Infallible> {
     info!("list jobs");
-    let jobs = db.lock().unwrap();
+    let jobs = db.lock().await;
     let list: Vec<JobId> = jobs.iter().map(|(k, _)| k).collect();
-    warp::reply::json(&list)
+    Ok(warp::reply::json(&list))
 }
 
 /// List files in job working directory
 ///
 /// GET /jobs/:id/files
-fn list_job_files(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    let mut jobs = db.lock().unwrap();
+async fn list_job_files(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+    let mut jobs = db.lock().await;
     info!("list files for job {}", id);
 
     // List files for the specified Job...
@@ -405,13 +373,11 @@ fn list_job_files(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection
 }
 // list job:1 ends here
 
-// job files
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*job%20files][job files:1]]
-/// `GET` /jobs/:id/files/:file
-pub fn get_job_file(id: JobId, file: String, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+// [[file:../runners.note::*job files][job files:1]]
+// `GET` /jobs/:id/files/:file
+async fn get_job_file(id: JobId, file: String, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     debug!("get_job_file: id={}", id);
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
 
     // Look for the specified Job...
     if jobs.contains(id) {
@@ -436,14 +402,14 @@ pub fn get_job_file(id: JobId, file: String, db: Db) -> Result<impl warp::Reply,
 }
 
 /// `PUT` /jobs/:id/files/:file
-pub fn put_job_file(
+async fn put_job_file(
     id: JobId,
     file: String,
     db: Db,
-    body: warp::body::FullBody,
+    body: bytes::Bytes,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     debug!("put_job_file: id={}", id);
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
     // Look for the specified Job...
     if jobs.contains(id) {
         let job = &jobs[id];
@@ -451,7 +417,7 @@ pub fn put_job_file(
         info!("client request to put a file: {}", p.display());
         match std::fs::File::create(p) {
             Ok(mut f) => {
-                let _ = f.write_all(body.bytes());
+                let _ = f.write_all(&body);
                 return Ok(warp::reply());
             }
             Err(e) => {
@@ -465,19 +431,17 @@ pub fn put_job_file(
 }
 // job files:1 ends here
 
-// shutdown
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*shutdown][shutdown:1]]
-/// DELETE /jobs
-/// shutdown server
-fn shutdown_server(db: Db) -> impl warp::Reply {
+// [[file:../runners.note::*shutdown][shutdown:1]]
+// shutdown server
+// DELETE /jobs
+pub async fn shutdown_server(db: Db) -> Result<impl warp::Reply, std::convert::Infallible> {
     info!("shudown server now ...");
     // drop jobs
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
     jobs.clear();
 
-    send_signal(tokio_signal::unix::SIGINT);
-    warp::http::StatusCode::NO_CONTENT
+    send_signal(libc::SIGINT);
+    Ok(warp::http::StatusCode::NO_CONTENT)
 }
 
 #[cfg(unix)]
@@ -491,14 +455,12 @@ pub fn send_signal(signal: libc::c_int) {
 }
 // shutdown:1 ends here
 
-// wait job
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*wait%20job][wait job:1]]
+// [[file:../runners.note::*wait job][wait job:1]]
 /// GET /jobs/:id
-fn wait_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+async fn wait_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     info!("wait_job: id={}", id);
 
-    let mut jobs = db.lock().unwrap();
+    let mut jobs = db.lock().await;
     if jobs.contains(id) {
         &jobs[id].wait();
         // respond with a `204 No Content`, which means successful,
@@ -512,17 +474,15 @@ fn wait_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
 }
 // wait job:1 ends here
 
-// core
-
-// [[file:~/Workspace/Programming/gosh-rs/runners/runners.note::*core][core:1]]
+// [[file:../runners.note::*routes][routes:1]]
 impl Server {
-    fn serve(&self) {
+    async fn serve(&self) {
         // These are some `Filter`s that several of the endpoints share,
         // so we'll define them here and reuse them below...
 
         // Turn our "state", our db, into a Filter so we can combine it
         // easily with others...
-        let db = Arc::new(Mutex::new(Jobs::new()));
+        let db = blank_db();
         let db = warp::any().map(move || db.clone());
 
         // Just the path segment "jobs"...
@@ -534,9 +494,7 @@ impl Server {
 
         // Combined with an id path parameter, for refering to a specific Job.
         // For example, `POST /jobs/32`, but not `POST /jobs/32/something-more`.
-        let job_id = jobs
-            .and(warp::path::param::<JobId>())
-            .and(warp::path::end());
+        let job_id = jobs.and(warp::path::param::<JobId>()).and(warp::path::end());
 
         // jobs/:id/files
         let job_dir = path!("jobs" / JobId / "files").and(warp::path::end());
@@ -551,54 +509,42 @@ impl Server {
         // Next, we'll define each our endpoints:
 
         // `GET /jobs`
-        let list = warp::get2().and(jobs_index).and(db.clone()).map(list_jobs);
+        let list = warp::get().and(jobs_index).and(db.clone()).and_then(list_jobs);
 
         // `DELETE /jobs`
-        let shutdown = warp::delete2()
-            .and(jobs_index)
-            .and(db.clone())
-            .map(shutdown_server);
+        let shutdown = warp::delete().and(jobs_index).and(db.clone()).and_then(shutdown_server);
 
         // `POST /jobs`
-        let create = warp::post2()
+        let create = warp::post()
             .and(jobs_index)
             .and(json_body)
             .and(db.clone())
             .and_then(create_job);
 
         // `PUT /jobs/:id`
-        let update = warp::put2()
+        let update = warp::put()
             .and(job_id)
             .and(json_body)
             .and(db.clone())
             .and_then(update_job);
 
         // `DELETE /jobs/:id`
-        let delete = warp::delete2()
-            .and(job_id)
-            .and(db.clone())
-            .and_then(delete_job);
+        let delete = warp::delete().and(job_id).and(db.clone()).and_then(delete_job);
 
         // `GET` /jobs/:id/files
-        let list_dir = warp::get2()
-            .and(job_dir)
-            .and(db.clone())
-            .and_then(list_job_files);
+        let list_dir = warp::get().and(job_dir).and(db.clone()).and_then(list_job_files);
 
         // `GET /jobs/:id`
-        let wait = warp::get2().and(job_id).and(db.clone()).and_then(wait_job);
+        let wait = warp::get().and(job_id).and(db.clone()).and_then(wait_job);
 
         // `GET` /jobs/:id/files/:file
-        let get_file = warp::get2()
-            .and(job_file)
-            .and(db.clone())
-            .and_then(get_job_file);
+        let get_file = warp::get().and(job_file).and(db.clone()).and_then(get_job_file);
 
         // `PUT` /jobs/:id/files/:file
-        let put_file = warp::put2()
+        let put_file = warp::put()
             .and(job_file)
             .and(db.clone())
-            .and(warp::body::concat())
+            .and(warp::body::bytes())
             .and_then(put_job_file);
 
         // Combine our endpoints, since we want requests to match any of them:
@@ -619,33 +565,61 @@ impl Server {
         // Start up the server in a scratch directory ...
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // setup signal handler
-        let sig = tokio_signal::ctrl_c()
-            .flatten_stream()
-            .into_future()
-            .map(move |_| {
-                println!("User interrupted.");
-                let _ = tx.send(());
-            });
-
-        let (addr, server) = server.bind_with_graceful_shutdown(self.address, rx);
+        let (addr, server) = server.bind_with_graceful_shutdown(self.address, async {
+            rx.await.ok();
+        });
         dbg!(addr);
 
-        // Spawn the server into a runtime
-        let fut = sig.select2(server).map(|_| ()).map_err(|_| ());
-        tokio::run(fut);
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::select! {
+            _ = server => {
+                eprintln!("server closed");
+            }
+            _ = ctrl_c => {
+                let _ = tx.send(());
+                eprintln!("user interruption");
+            }
+        }
     }
 }
+// routes:1 ends here
 
+// [[file:../runners.note::*pub/fn][pub/fn:1]]
 /// Run local server for tests
-pub fn run() {
+pub(self) async fn run() {
     let addr = DEFAULT_SERVER_ADDRESS;
     let server = Server::new(addr);
-    server.serve();
+    server.serve().await;
 }
 
-pub fn bind(addr: &str) {
+pub(self) async fn bind(addr: &str) {
     let server = Server::new(addr);
-    server.serve();
+    server.serve().await;
 }
-// core:1 ends here
+// pub/fn:1 ends here
+
+// [[file:../runners.note::*pub/cli][pub/cli:1]]
+use structopt::*;
+
+/// Application server for remote calculations.
+#[derive(StructOpt, Debug)]
+struct Cli {
+    /// Set application server address for binding.
+    #[structopt(name = "ADDRESS")]
+    address: Option<String>,
+}
+
+#[tokio::main]
+pub async fn enter_main() -> Result<()> {
+    let args = Cli::from_args();
+
+    if let Some(addr) = args.address {
+        dbg!(&addr);
+        bind(&addr).await;
+    } else {
+        run().await;
+    }
+
+    Ok(())
+}
+// pub/cli:1 ends here
