@@ -1,5 +1,7 @@
 // [[file:../../runners.note::*main/warp][main/warp:1]]
-use gosh_core::gut::prelude::*;
+use gosh_core::gut;
+
+use gut::prelude::*;
 
 fn main() -> Result<()> {
     gosh_runner::server::enter_main()

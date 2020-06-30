@@ -43,7 +43,7 @@ impl Client {
     pub fn delete_job(&self, id: JobId) -> Result<()> {
         let url = format!("{}/jobs/{}", self.server_addr, id);
         let new = reqwest::blocking::Client::new().delete(&url).send()?;
-        dbg!(new);
+        dbg!(new.text());
 
         Ok(())
     }
@@ -69,13 +69,15 @@ impl Client {
     }
 
     /// Request server to create a job.
-    pub fn create_job(&self, script: &str) -> Result<()> {
+    pub fn create_job(&self, script: &str) -> Result<JobId> {
         let url = format!("{}/jobs/", self.server_addr);
         let job = Job::new(script);
         let new = reqwest::blocking::Client::new().post(&url).json(&job).send()?;
-        dbg!(new);
 
-        Ok(())
+        let resp = new.text().context("client requests to create job")?;
+        debug!("server response: {}", resp);
+        let job_id: JobId = resp.trim().parse()?;
+        Ok(job_id)
     }
 
     /// Request server to list current jobs in queue.

@@ -288,10 +288,10 @@ async fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::R
 
     // run command
     create.build();
-    create.start();
 
     // Insert job into the queue.
     let jid = jobs.insert(create);
+    info!("Job {} created.", jid);
 
     Ok(warp::reply::json(&jid))
 }
@@ -462,7 +462,8 @@ async fn wait_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection
 
     let mut jobs = db.lock().await;
     if jobs.contains(id) {
-        &jobs[id].wait();
+        &jobs[id].start().await;
+        &jobs[id].wait().await;
         // respond with a `204 No Content`, which means successful,
         // yet no body expected...
         Ok(warp::http::StatusCode::NO_CONTENT)
@@ -599,12 +600,23 @@ pub(self) async fn bind(addr: &str) {
 // pub/fn:1 ends here
 
 // [[file:../runners.note::*pub/cli][pub/cli:1]]
+use gosh_core::gut;
 use structopt::*;
+
+use gut::prelude::*;
 
 /// Application server for remote calculations.
 #[derive(StructOpt, Debug)]
 struct Cli {
+    #[structopt(flatten)]
+    verbose: gut::cli::Verbosity,
+
     /// Set application server address for binding.
+    ///
+    /// * Example
+    ///
+    /// - app-server localhost:3030 (default)
+    /// - app-server tower:7070
     #[structopt(name = "ADDRESS")]
     address: Option<String>,
 }
@@ -612,6 +624,7 @@ struct Cli {
 #[tokio::main]
 pub async fn enter_main() -> Result<()> {
     let args = Cli::from_args();
+    args.verbose.setup_logger();
 
     if let Some(addr) = args.address {
         dbg!(&addr);
