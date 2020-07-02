@@ -180,7 +180,8 @@ impl Job {
         use std::os::unix::fs::OpenOptionsExt;
 
         // create working directory in scratch space.
-        let wdir = tempfile::tempdir().expect("temp dir");
+        // let wdir = tempfile::tempdir().expect("temp dir");
+        let wdir = tempfile::TempDir::new_in(".").expect("temp dir");
         self.wrk_dir = Some(wdir);
 
         // create run file
