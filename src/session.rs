@@ -1,4 +1,4 @@
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*imports][imports:1]]
+// [[file:../runners.note::*imports][imports:1]]
 use crate::common::*;
 
 use tokio::prelude::*;
@@ -7,7 +7,7 @@ use tokio::signal::ctrl_c;
 use tokio::time::{delay_for, Duration};
 // imports:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*base][base:1]]
+// [[file:../runners.note::*base][base:1]]
 /// Manage process session
 #[derive(Debug)]
 pub struct Session {
@@ -127,7 +127,7 @@ impl Session {
 }
 // base:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*core][core:1]]
+// [[file:../runners.note::*core][core:1]]
 impl Session {
     async fn start(&mut self) -> Result<()> {
         use std::process::Stdio;
@@ -197,7 +197,7 @@ impl Session {
 }
 // core:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*pub][pub:1]]
+// [[file:../runners.note::*pub][pub:1]]
 impl Session {
     /// Run command with session manager.
     pub fn run(mut self) -> Result<std::process::Output> {
@@ -209,8 +209,8 @@ impl Session {
 }
 // pub:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*cli][cli:1]]
-use structopt::*;
+// [[file:../runners.note::*cli][cli:1]]
+use gut::cli::*;
 
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug, Default)]
@@ -244,7 +244,7 @@ pub fn enter_main() -> Result<()> {
 }
 // cli:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*test][test:1]]
+// [[file:../runners.note::*test][test:1]]
 #[test]
 fn test_tokio() -> Result<()> {
     gut::cli::setup_logger_for_test();

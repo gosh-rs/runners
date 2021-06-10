@@ -1,8 +1,8 @@
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*imports][imports:1]]
+// [[file:../runners.note::*imports][imports:1]]
 use crate::common::*;
 // imports:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*signal][signal:1]]
+// [[file:../runners.note::*signal][signal:1]]
 use nix::sys::signal::Signal;
 #[test]
 #[ignore]
@@ -12,7 +12,7 @@ fn test_unix_signal() {
 }
 // signal:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*timestamp][timestamp:1]]
+// [[file:../runners.note::*timestamp][timestamp:1]]
 use chrono::*;
 
 /// Convert unix timestamp in floating point seconds to `DateTime`
@@ -22,7 +22,7 @@ fn float_unix_timestamp_to_date_time(t: f64) -> DateTime<Utc> {
 }
 // timestamp:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*unique process][unique process:1]]
+// [[file:../runners.note::*unique process][unique process:1]]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ impl UniqueProcessId {
 }
 // unique process:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*impl/psutil/v3][impl/psutil/v3:1]]
+// [[file:../runners.note::*impl/psutil/v3][impl/psutil/v3:1]]
 /// Find child processes using psutil (without using shell commands)
 ///
 /// # Reference
@@ -116,9 +116,9 @@ fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
 }
 // impl/psutil/v3:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*pub][pub:1]]
+// [[file:../runners.note::*pub][pub:1]]
 /// Signal all child processes in session `sid`
-pub(crate) fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
+pub fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
     info!("killing session {} with signal {}", sid, signal);
     impl_signal_processes_by_session_id(sid, signal)
 }
