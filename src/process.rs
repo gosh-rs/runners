@@ -46,10 +46,8 @@ mod process_group {
 // [[file:../runners.note::*signal][signal:1]]
 use nix::sys::signal::Signal;
 #[test]
-#[ignore]
 fn test_unix_signal() {
     let s: Signal = "SIGINT".parse().unwrap();
-    dbg!(s);
 }
 // signal:1 ends here
 

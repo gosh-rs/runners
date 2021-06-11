@@ -4,7 +4,7 @@ mod job;
 mod local;
 mod process;
 mod server;
-// mod session;
+mod session;
 // mods:1 ends here
 
 // [[file:../runners.note::*pub][pub:1]]
