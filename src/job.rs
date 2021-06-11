@@ -2,7 +2,6 @@
 use crate::common::*;
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use tempfile::{tempdir, tempdir_in, TempDir};
 // imports:1 ends here
 

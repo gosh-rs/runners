@@ -4,6 +4,6 @@ use gosh_core::gut;
 use gut::prelude::*;
 
 fn main() -> Result<()> {
-    gosh_runner::server::enter_main()
+    gosh_runner::server_enter_main()
 }
 // main/warp:1 ends here

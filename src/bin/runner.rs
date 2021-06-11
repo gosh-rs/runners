@@ -1,56 +1,10 @@
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*imports][imports:1]]
-use gosh_core::gut;
-use gut::prelude::*;
-
-use structopt::StructOpt;
+// [[file:../../runners.note::*imports][imports:1]]
+use gosh_core::gut::prelude::*;
 // imports:1 ends here
 
-// [[file:~/Workspace/Programming/gosh-rs/runner/runners.note::*main][main:1]]
-use gosh_runner::local::Runner;
-
-use std::path::Path;
-use structopt::*;
-
+// [[file:../../runners.note::*main][main:1]]
 fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().collect();
-    assert!(args.len() >= 1, "{:?}", args);
-    // The path to symlink file that invoking the real program
-    let invoke_path: &Path = &args[0].as_ref();
-
-    // check file extension for sure (should be foo.run)
-    // REVIEW: must be carefully here: not to enter infinite loop
-    if let Some("run") = invoke_path.extension().and_then(|s| s.to_str()) {
-        // apply symlink magic
-        // call the program that symlink pointing to
-        let invoke_exe = invoke_path.file_stem().context("invoke exe name")?;
-
-        // The path to real executable binary
-        let real_path = std::env::current_exe().context("Failed to get exe path")?;
-        println!("Runner exe path: {:?}", real_path);
-        let real_exe = real_path.file_name().context("real exe name")?;
-
-        if real_exe != invoke_exe {
-            let runner_args = [
-                &real_exe.to_string_lossy(),
-                "-v",
-                "--",
-                &invoke_exe.to_string_lossy(),
-            ];
-
-            let cmdline: Vec<_> = runner_args
-                .iter()
-                .map(|s| s.to_string())
-                .chain(args.iter().cloned().skip(1))
-                .collect();
-            println!(
-                "runner will call {:?} with {:?}",
-                invoke_exe,
-                cmdline.join(" ")
-            );
-            return Runner::enter_main(cmdline);
-        }
-    }
-    // run in a normal way
-    Runner::enter_main(std::env::args())
+    gosh_runner::local_enter_main()?;
+    Ok(())
 }
 // main:1 ends here

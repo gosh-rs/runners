@@ -6,7 +6,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::prelude::*;
 
 use crate::common::*;
 // imports:1 ends here
@@ -227,8 +226,9 @@ impl Job {
     fn terminate(&mut self) {
         if let Some(child) = &mut self.session {
             let sid = child.id();
-            crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
-            info!("Job with command session {} has been terminated.", sid);
+            // FIXME: 
+            // crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
+            // info!("Job with command session {} has been terminated.", sid);
         } else {
             debug!("Job not started yet.");
         }
@@ -236,8 +236,6 @@ impl Job {
 
     /// Run command in background.
     async fn start(&mut self) -> Result<()> {
-        use tokio::prelude::*;
-
         let wdir = self.wrk_dir();
         info!("job work direcotry: {}", wdir.display());
 
@@ -263,7 +261,7 @@ impl Job {
         tokio::io::copy(&mut stderr, &mut ferr).await?;
 
         let sid = child.id();
-        info!("command running in session {}", sid);
+        info!("command running in session {:?}", sid);
         self.session = Some(child);
 
         Ok(())
@@ -278,6 +276,8 @@ impl Drop for Job {
 // core:1 ends here
 
 // [[file:../runners.note::*imports][imports:1]]
+use bytes::Bytes;
+use tokio::io::AsyncWriteExt;
 use warp::*;
 // imports:1 ends here
 
@@ -407,7 +407,7 @@ async fn put_job_file(
     id: JobId,
     file: String,
     db: Db,
-    body: bytes::Bytes,
+    body: Bytes,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     debug!("put_job_file: id={}", id);
     let mut jobs = db.lock().await;

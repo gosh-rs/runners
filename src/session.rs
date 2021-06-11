@@ -1,10 +1,10 @@
 // [[file:../runners.note::*imports][imports:1]]
 use crate::common::*;
 
-use tokio::prelude::*;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::signal::ctrl_c;
-use tokio::time::{delay_for, Duration};
+use tokio::time::{sleep as delay_for, Duration};
 // imports:1 ends here
 
 // [[file:../runners.note::*base][base:1]]
@@ -139,7 +139,7 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        self.sid = Some(child.id());
+        self.sid = child.id();
 
         child
             .stdin
@@ -153,15 +153,15 @@ impl Session {
 
         // running timeout for 2 days
         let default_timeout = 3600 * 2;
-        let timeout = delay_for(Duration::from_secs(
-            self.timeout.unwrap_or(default_timeout) as u64
-        ));
+        let timeout = delay_for(Duration::from_secs(self.timeout.unwrap_or(default_timeout) as u64));
+        tokio::pin!(timeout);
+
         // user interruption
         let ctrl_c = tokio::signal::ctrl_c();
 
         let v: usize = loop {
             tokio::select! {
-                _ = timeout => {
+                _ = &mut timeout => {
                     eprintln!("Program timed out");
                     break 1;
                 }

@@ -149,21 +149,19 @@ use gosh_core::gut::{cli::*, prelude::*};
 
 /// A commander for interactive interpreter
 #[derive(Default)]
-pub struct Command {
+struct Command {
     client: Option<Client>,
 }
 
 impl Command {
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Self { ..Default::default() }
     }
 }
 
 #[derive(StructOpt, Debug)]
 #[structopt(setting = structopt::clap::AppSettings::VersionlessSubcommands)]
-pub enum Action {
+enum Action {
     /// Quit REPL shell.
     #[structopt(name = "quit", alias = "q", alias = "exit")]
     Quit {},
@@ -306,5 +304,59 @@ impl Command {
             bail!("App server not connected.");
         }
     }
+}
+
+pub fn enter_main() -> Result<()> {
+    use linefeed::{Interface, ReadResult};
+
+    let interface = Interface::new("application runner client")?;
+
+    let version = env!("CARGO_PKG_VERSION");
+    println!("This is the rusty gosh shell version {}.", version);
+    println!("Enter \"help\" or \"?\" for a list of commands.");
+    println!("Press Ctrl-D or enter \"quit\" or \"q\" to exit.");
+    println!("");
+
+    interface.set_prompt("app> ")?;
+
+    let mut command = Command::new();
+    while let ReadResult::Input(line) = interface.read_line()? {
+        let line = line.trim();
+        if !line.is_empty() {
+            interface.add_history(line.to_owned());
+
+            let mut args: Vec<_> = line.split_whitespace().collect();
+            args.insert(0, "app>");
+
+            match Action::from_iter_safe(&args) {
+                // show subcommands
+                Ok(Action::Help {}) => {
+                    let mut app = Action::clap();
+                    app.print_help();
+                    println!("");
+                }
+
+                Ok(Action::Quit {}) => {
+                    break;
+                }
+
+                // apply subcommand
+                Ok(x) => {
+                    if let Err(e) = command.apply(&x) {
+                        eprintln!("{:?}", e);
+                    }
+                }
+
+                // show subcommand usage
+                Err(e) => {
+                    println!("{}", e.message);
+                }
+            }
+        } else {
+            println!("");
+        }
+    }
+
+    Ok(())
 }
 // pub/cli:1 ends here

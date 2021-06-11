@@ -1,17 +1,18 @@
-// [[file:../runners.note::*lib.rs][lib.rs:1]]
+// [[file:../runners.note::*mods][mods:1]]
+mod client;
 mod job;
+mod local;
 mod process;
-mod session;
+mod server;
+// mod session;
+// mods:1 ends here
 
-//pub mod adhoc;
-pub mod client;
-pub mod local;
-pub mod server;
-
+// [[file:../runners.note::*pub][pub:1]]
+// shared imports between mods
 pub(crate) mod common {
     pub use gosh_core::*;
-
     pub use gut::prelude::*;
+    pub use std::path::{Path, PathBuf};
 
     /// Return current timestamp string
     pub fn timestamp_now() -> String {
@@ -20,4 +21,11 @@ pub(crate) mod common {
         format!("{}", now)
     }
 }
-// lib.rs:1 ends here
+
+// for command line binaries
+pub use client::enter_main as client_enter_main;
+pub use local::enter_main as local_enter_main;
+pub use server::enter_main as server_enter_main;
+
+pub use client::Client;
+// pub:1 ends here

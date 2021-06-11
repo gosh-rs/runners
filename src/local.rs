@@ -1,16 +1,15 @@
 // [[file:../runners.note::*imports][imports:1]]
 use crate::common::*;
 
-use tokio::prelude::*;
 use tokio::process::Command;
 use tokio::signal::ctrl_c;
-use tokio::time::{delay_for, Duration};
+use tokio::time::Duration;
 // imports:1 ends here
 
 // [[file:../runners.note::*base][base:1]]
 /// Manage process session
 #[derive(Debug)]
-pub struct Session {
+struct Session {
     /// Session ID
     sid: Option<u32>,
 
@@ -117,7 +116,7 @@ impl Session {
 impl Session {
     async fn start(&mut self) -> Result<()> {
         let mut child = self.command.spawn()?;
-        self.sid = Some(child.id());
+        self.sid = child.id();
         // Ensure we close any stdio handles so we can't deadlock
         // waiting on the child which may be waiting to read/write
         // to a pipe we're holding.
@@ -127,15 +126,14 @@ impl Session {
 
         // running timeout for 2 days
         let default_timeout = 3600 * 2;
-        let timeout = delay_for(Duration::from_secs(
-            self.timeout.unwrap_or(default_timeout) as u64
-        ));
+        let timeout = tokio::time::sleep(Duration::from_secs(self.timeout.unwrap_or(default_timeout) as u64));
+        tokio::pin!(timeout);
         // user interruption
         let ctrl_c = tokio::signal::ctrl_c();
 
         let v: usize = loop {
             tokio::select! {
-                _ = timeout => {
+                _ = &mut timeout => {
                     eprintln!("program timed out");
                     break 1;
                 }
@@ -143,7 +141,7 @@ impl Session {
                     eprintln!("user interruption");
                     break 1;
                 }
-                o = child => {
+                o = child.wait() => {
                     println!("program completed");
                     match o {
                         Ok(o) => {
@@ -168,11 +166,7 @@ impl Session {
 
         Ok(())
     }
-}
-// core:1 ends here
-
-// [[file:../runners.note::*pub][pub:1]]
-impl Session {
+    
     /// Run command with session manager.
     pub fn run(mut self) -> Result<()> {
         let mut rt = tokio::runtime::Runtime::new().context("tokio runtime failure")?;
@@ -181,14 +175,14 @@ impl Session {
         Ok(())
     }
 }
-// pub:1 ends here
+// core:1 ends here
 
 // [[file:../runners.note::*cli][cli:1]]
 use gut::cli::*;
 
 /// A local runner that can make graceful exit
 #[derive(StructOpt, Debug, Default)]
-pub struct Runner {
+struct RunnerCli {
     #[structopt(flatten)]
     verbose: gut::cli::Verbosity,
 
@@ -201,14 +195,14 @@ pub struct Runner {
     cmdline: Vec<String>,
 }
 
-impl Runner {
-    pub fn enter_main<I>(iter: I) -> Result<()>
+impl RunnerCli {
+    fn enter_main<I>(iter: I) -> Result<()>
     where
         Self: Sized,
         I: IntoIterator,
         I::Item: Into<std::ffi::OsString> + Clone,
     {
-        let args = Runner::from_iter_safe(iter)?;
+        let args = RunnerCli::from_iter_safe(iter)?;
         args.verbose.setup_logger();
 
         let program = &args.cmdline[0];
@@ -221,5 +215,39 @@ impl Runner {
 
         Ok(())
     }
+}
+
+pub fn enter_main() -> Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+    assert!(args.len() >= 1, "{:?}", args);
+    // The path to symlink file that invoking the real program
+    let invoke_path: &Path = &args[0].as_ref();
+
+    // check file extension for sure (should be foo.run)
+    // REVIEW: must be carefully here: not to enter infinite loop
+    if let Some("run") = invoke_path.extension().and_then(|s| s.to_str()) {
+        // apply symlink magic
+        // call the program that symlink pointing to
+        let invoke_exe = invoke_path.file_stem().context("invoke exe name")?;
+
+        // The path to real executable binary
+        let real_path = std::env::current_exe().context("Failed to get exe path")?;
+        println!("Runner exe path: {:?}", real_path);
+        let real_exe = real_path.file_name().context("real exe name")?;
+
+        if real_exe != invoke_exe {
+            let runner_args = [&real_exe.to_string_lossy(), "-v", "--", &invoke_exe.to_string_lossy()];
+
+            let cmdline: Vec<_> = runner_args
+                .iter()
+                .map(|s| s.to_string())
+                .chain(args.iter().cloned().skip(1))
+                .collect();
+            println!("runner will call {:?} with {:?}", invoke_exe, cmdline.join(" "));
+            return RunnerCli::enter_main(cmdline);
+        }
+    }
+    // run in a normal way
+    RunnerCli::enter_main(std::env::args())
 }
 // cli:1 ends here
