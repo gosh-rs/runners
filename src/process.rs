@@ -124,20 +124,13 @@ fn get_child_processes_by_session_id(sid: u32) -> Result<HashSet<UniqueProcessId
 /// Note: currently, psutil has no API for kill with signal other than SIGKILL
 ///
 fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
-    let signal: Signal = signal
-        .parse()
-        .with_context(|| format!("invalid signal str: {}", signal))?;
+    let signal: Signal = signal.parse().with_context(|| format!("invalid signal: {}", signal))?;
 
     let child_processes = get_child_processes_by_session_id(sid)?;
-    info!(
-        "session {} has {} child processes",
-        sid,
-        child_processes.len()
-    );
+    debug!("found {} child processes in session {} ", child_processes.len(), sid);
 
     for child in child_processes {
-        debug!("{:?}", child);
-
+        trace!("{:?}", child);
         // refresh process id from /proc before kill
         // check starttime to avoid re-used pid
         let pid = child.pid();

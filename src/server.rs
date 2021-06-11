@@ -225,10 +225,10 @@ impl Job {
     /// Terminate background command session.
     fn terminate(&mut self) {
         if let Some(child) = &mut self.session {
-            let sid = child.id();
-            // FIXME: 
-            // crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
-            // info!("Job with command session {} has been terminated.", sid);
+            if let Some(sid) = child.id() {
+                crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
+                info!("Job with command session {} has been terminated.", sid);
+            }
         } else {
             debug!("Job not started yet.");
         }
