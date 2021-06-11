@@ -2,6 +2,47 @@
 use crate::common::*;
 // imports:1 ends here
 
+// [[file:../runners.note::*process group][process group:1]]
+mod process_group {
+    use super::*;
+
+    macro_rules! setsid {
+        () => {{
+            // Don't check the error of setsid because it fails if we're the
+            // process leader already. We just forked so it shouldn't return
+            // error, but ignore it anyway.
+            nix::unistd::setsid().ok();
+            Ok(())
+        }};
+    }
+
+    /// Create child process in new session
+    pub trait ProcessGroupExt<T> {
+        fn new_process_group(&mut self) -> &mut T;
+    }
+
+    impl ProcessGroupExt<std::process::Command> for std::process::Command {
+        fn new_process_group(&mut self) -> &mut std::process::Command {
+            use std::os::unix::process::CommandExt;
+
+            unsafe {
+                self.pre_exec(|| setsid!());
+            }
+            self
+        }
+    }
+
+    impl ProcessGroupExt<tokio::process::Command> for tokio::process::Command {
+        fn new_process_group(&mut self) -> &mut tokio::process::Command {
+            unsafe {
+                self.pre_exec(|| setsid!());
+            }
+            self
+        }
+    }
+}
+// process group:1 ends here
+
 // [[file:../runners.note::*signal][signal:1]]
 use nix::sys::signal::Signal;
 #[test]
@@ -52,7 +93,7 @@ impl UniqueProcessId {
 }
 // unique process:1 ends here
 
-// [[file:../runners.note::*impl/psutil/v3][impl/psutil/v3:1]]
+// [[file:../runners.note::*impl/psutil][impl/psutil:1]]
 /// Find child processes using psutil (without using shell commands)
 ///
 /// # Reference
@@ -114,7 +155,7 @@ fn impl_signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
 
     Ok(())
 }
-// impl/psutil/v3:1 ends here
+// impl/psutil:1 ends here
 
 // [[file:../runners.note::*pub][pub:1]]
 /// Signal all child processes in session `sid`
@@ -122,4 +163,6 @@ pub fn signal_processes_by_session_id(sid: u32, signal: &str) -> Result<()> {
     info!("killing session {} with signal {}", sid, signal);
     impl_signal_processes_by_session_id(sid, signal)
 }
+
+pub use process_group::ProcessGroupExt;
 // pub:1 ends here

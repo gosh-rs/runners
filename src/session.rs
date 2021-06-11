@@ -227,7 +227,7 @@ struct Runner {
     cmdline: Vec<String>,
 }
 
-pub fn enter_main() -> Result<()> {
+fn enter_main() -> Result<()> {
     let args = Runner::from_args();
     args.verbose.setup_logger();
 

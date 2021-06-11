@@ -24,8 +24,12 @@ pub(crate) mod common {
 
 // for command line binaries
 pub use client::enter_main as client_enter_main;
+pub use client::Client;
 pub use local::enter_main as local_enter_main;
 pub use server::enter_main as server_enter_main;
 
-pub use client::Client;
+/// Some extension traits
+pub mod prelude {
+    pub use crate::process::ProcessGroupExt;
+}
 // pub:1 ends here
