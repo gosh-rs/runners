@@ -7,7 +7,7 @@ use tokio::time::Duration;
 // imports:1 ends here
 
 // [[file:../runners.note::*base][base:1]]
-/// Manage process session
+/// Manage process group using session
 #[derive(Debug)]
 struct Session {
     /// Session ID
@@ -26,10 +26,12 @@ struct Session {
 impl Session {
     /// Create a new session.
     pub fn new(program: &str) -> Self {
+        use crate::process::ProcessGroupExt;
+
         // setsid -w external-cmd
-        let mut command = Command::new("setsid");
+        let mut command = Command::new(program);
         // do not kill command when `Child` drop
-        command.arg("-w").arg(program).kill_on_drop(false);
+        command.kill_on_drop(false).new_process_group();
 
         Self {
             command,
