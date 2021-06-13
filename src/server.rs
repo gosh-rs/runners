@@ -1,64 +1,20 @@
 // [[file:../runners.note::*imports][imports:1]]
 // #![deny(warnings)]
-
-use std::io::Read;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use crate::common::*;
 
 use serde::{Deserialize, Serialize};
-
-use crate::common::*;
+use std::io::Read;
+use std::io::Write;
 // imports:1 ends here
 
-// [[file:../runners.note::*base/job][base/job:1]]
-pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:3030";
-
-#[derive(Clone, Debug)]
-enum JobStatus {
-    NotStarted,
-    Running,
-    /// failure code
-    Failure(i32),
-    Success,
-}
-
-impl Default for JobStatus {
-    fn default() -> Self {
-        Self::NotStarted
-    }
-}
-
-pub type JobId = usize;
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Job {
-    out_file: String,
-
-    err_file: String,
-
-    run_file: String,
-
-    script: String,
-
-    input: String,
-
-    inp_file: String,
-
-    #[serde(skip)]
-    status: JobStatus,
-
-    #[serde(skip)]
-    wrk_dir: Option<tempfile::TempDir>,
-
-    // command session
-    #[serde(skip)]
-    session: Option<tokio::process::Child>,
-}
-// base/job:1 ends here
-
-// [[file:../runners.note::*base/db][base/db:1]]
+// [[file:../runners.note::*base][base:1]]
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:3030";
+
+use crate::job::Id as JobId;
+use crate::job::Job;
 
 // type Jobs = Vec<Job>;
 type Jobs = slab::Slab<Job>;
@@ -70,7 +26,7 @@ type Db = Arc<Mutex<Jobs>>;
 fn blank_db() -> Db {
     Arc::new(Mutex::new(Jobs::new()))
 }
-// base/db:1 ends here
+// base:1 ends here
 
 // [[file:../runners.note::*base/server][base/server:1]]
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -103,177 +59,6 @@ impl Server {
     }
 }
 // base/server:1 ends here
-
-// [[file:../runners.note::*job][job:1]]
-impl Job {
-    ///
-    /// Construct a Job with shell script of job run_file.
-    ///
-    /// # Parameters
-    ///
-    /// * script: the content of the script for running the job.
-    ///
-    pub fn new(script: &str) -> Self {
-        Self {
-            script: script.into(),
-            input: String::new(),
-
-            out_file: "job.out".into(),
-            err_file: "job.err".into(),
-            run_file: "run".into(),
-            inp_file: "job.inp".into(),
-
-            // state variables
-            status: JobStatus::default(),
-            session: None,
-            wrk_dir: None,
-        }
-    }
-
-    /// Set content of job stdin stream.
-    fn with_stdin(mut self, content: &str) -> Self {
-        self.input = content.into();
-        self
-    }
-
-    /// Return full path to computation output file (stdout).
-    fn out_file(&self) -> PathBuf {
-        let wdir = self.wrk_dir();
-        wdir.join(&self.out_file)
-    }
-
-    /// Return full path to computation output file (stdout).
-    fn err_file(&self) -> PathBuf {
-        let wdir = self.wrk_dir();
-        wdir.join(&self.err_file)
-    }
-
-    /// Return full path to computation output file (stdout).
-    fn inp_file(&self) -> PathBuf {
-        let wdir = self.wrk_dir();
-        wdir.join(&self.inp_file)
-    }
-
-    /// Return full path to computation output file (stdout).
-    fn run_file(&self) -> PathBuf {
-        let wdir = self.wrk_dir();
-        wdir.join(&self.run_file)
-    }
-
-    fn wrk_dir(&self) -> &Path {
-        if let Some(d) = &self.wrk_dir {
-            d.path()
-        } else {
-            panic!("no working dir!")
-        }
-    }
-}
-// job:1 ends here
-
-// [[file:../runners.note::*core][core:1]]
-impl Job {
-    /// Create runnable script file and stdin file from self.script and
-    /// self.input.
-    fn build(&mut self) {
-        use std::fs::File;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // create working directory in scratch space.
-        // let wdir = tempfile::tempdir().expect("temp dir");
-        let wdir = tempfile::TempDir::new_in(".").expect("temp dir");
-        self.wrk_dir = Some(wdir);
-
-        // create run file
-        let file = self.run_file();
-
-        // make run script executable
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .mode(0o770)
-            .open(&file)
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(self.script.as_bytes());
-                trace!("script content wrote to: {}.", file.display());
-            }
-            Err(e) => {
-                panic!("Error whiling creating job run file: {}", e);
-            }
-        }
-        let file = self.inp_file();
-        match File::create(&self.inp_file()) {
-            Ok(mut f) => {
-                let _ = f.write_all(self.input.as_bytes());
-                trace!("input content wrote to: {}.", file.display());
-            }
-            Err(e) => {
-                panic!("Error while creating job input file: {}", e);
-            }
-        }
-    }
-
-    /// Wait for background command to complete.
-    async fn wait(&mut self) {
-        if let Some(mut child) = self.session.take() {
-            child.wait_with_output().await;
-        } else {
-            error!("Job not started yet.");
-        }
-    }
-
-    /// Terminate background command session.
-    fn terminate(&mut self) {
-        if let Some(child) = &mut self.session {
-            if let Some(sid) = child.id() {
-                crate::process::signal_processes_by_session_id(sid, "SIGTERM").expect("term session");
-                info!("Job with command session {} has been terminated.", sid);
-            }
-        } else {
-            debug!("Job not started yet.");
-        }
-    }
-
-    /// Run command in background.
-    async fn start(&mut self) -> Result<()> {
-        let wdir = self.wrk_dir();
-        info!("job work direcotry: {}", wdir.display());
-
-        let mut child = tokio::process::Command::new(&self.run_file())
-            .current_dir(wdir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn command session");
-
-        let mut stdin = child.stdin.take().expect("child did not have a handle to stdout");
-        let mut stdout = child.stdout.take().expect("child did not have a handle to stdout");
-        let mut stderr = child.stderr.take().expect("child did not have a handle to stderr");
-
-        // NOTE: suppose stdin stream is small.
-        stdin.write_all(self.input.as_bytes()).await;
-
-        // redirect stdout and stderr to files for user inspection.
-        let mut fout = tokio::fs::File::create(self.out_file()).await?;
-        let mut ferr = tokio::fs::File::create(self.err_file()).await?;
-        tokio::io::copy(&mut stdout, &mut fout).await?;
-        tokio::io::copy(&mut stderr, &mut ferr).await?;
-
-        let sid = child.id();
-        info!("command running in session {:?}", sid);
-        self.session = Some(child);
-
-        Ok(())
-    }
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        self.terminate();
-    }
-}
-// core:1 ends here
 
 // [[file:../runners.note::*imports][imports:1]]
 use bytes::Bytes;
