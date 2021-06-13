@@ -1,4 +1,6 @@
 // [[file:../runners.note::*imports][imports:1]]
+//! For handling running task/job
+
 use crate::common::*;
 
 use serde::{Deserialize, Serialize};
@@ -29,17 +31,15 @@ pub type Id = usize;
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Job {
     // FIXME:
-    pub input: String,
+    pub(crate) input: String,
+    pub(crate) script: String,
 
-    pub script: String,
-    
     #[serde(skip)]
     status: Status,
 
-    // FIXME: 
+    // FIXME:
     // /// A short string describing the computation job.
     // name: String,
-
     /// Path to a file for saving input stream of computation
     inp_file: PathBuf,
 
@@ -54,11 +54,11 @@ pub struct Job {
 
     /// The working directory of computation
     #[serde(skip)]
-    pub wrk_dir: Option<TempDir>,
+    pub(crate) wrk_dir: Option<TempDir>,
 
     // command session
     #[serde(skip)]
-    pub session: Option<tokio::process::Child>,
+    pub(crate) session: Option<tokio::process::Child>,
 
     /// Extra files required for computation
     extra_files: Vec<PathBuf>,
@@ -89,13 +89,12 @@ impl Job {
             extra_files: vec![],
         }
     }
-    
+
     /// Set content of job stdin stream.
     fn with_stdin(mut self, content: &str) -> Self {
         self.input = content.into();
         self
     }
-
 
     pub fn wrk_dir(&self) -> &Path {
         if let Some(d) = &self.wrk_dir {

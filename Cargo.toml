@@ -27,4 +27,7 @@ gosh-core = { version = "0.0.2" }
 # nails = {path = "../nails/nails" }
 
 [dev-dependencies]
+
+[features]
+adhoc = []
 # cargo:1 ends here
