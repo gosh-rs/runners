@@ -3,32 +3,162 @@
 use crate::common::*;
 
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::io::Write;
 // imports:1 ends here
 
-// [[file:../runners.note::*base][base:1]]
+// [[file:../runners.note::*db][db:1]]
+use crate::job::Id as JobId;
+use crate::job::Job;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:3030";
 
-use crate::job::Id as JobId;
-use crate::job::Job;
-
-// type Jobs = Vec<Job>;
 type Jobs = slab::Slab<Job>;
 
-/// So we don't have to tackle how different database work, we'll just use
-/// a simple in-memory DB, a vector synchronized by a mutex.
-type Db = Arc<Mutex<Jobs>>;
-
-fn blank_db() -> Db {
-    Arc::new(Mutex::new(Jobs::new()))
+/// A simple in-memory DB for computational jobs.
+#[derive(Clone)]
+struct Db {
+    inner: Arc<Mutex<Jobs>>,
 }
-// base:1 ends here
 
-// [[file:../runners.note::*base/server][base/server:1]]
+impl Db {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Jobs::new())),
+        }
+    }
+
+    async fn update_job(&mut self, id: JobId, new_job: Job) -> Result<()> {
+        debug!("update_job: id={}, job={:?}", id, new_job);
+        let mut jobs = self.inner.lock().await;
+
+        // Look for the specified Job...
+        if jobs.contains(id) {
+            jobs[id] = new_job;
+            Ok(())
+        } else {
+            bail!("Job id not found: {}", id);
+        }
+    }
+
+    async fn delete_job(&mut self, id: JobId) -> Result<()> {
+        info!("delete_job: id={}", id);
+        let mut jobs = self.inner.lock().await;
+
+        if jobs.contains(id) {
+            let _ = jobs.remove(id);
+            Ok(())
+        } else {
+            bail!("Job id not found: {}", id);
+        }
+    }
+
+    async fn get_job_list(&self) -> Vec<JobId> {
+        self.inner.lock().await.iter().map(|(k, _)| k).collect()
+    }
+
+    async fn clear_jobs(&mut self) {
+        self.inner.lock().await.clear();
+    }
+
+    async fn wait_job(&self, id: JobId) -> Result<()> {
+        info!("wait_job: id={}", id);
+        let mut jobs = self.inner.lock().await;
+        if jobs.contains(id) {
+            &jobs[id].start().await;
+            &jobs[id].wait().await;
+            Ok(())
+        } else {
+            bail!("job not found: {}", id);
+        }
+    }
+
+    pub async fn put_job_file(&mut self, id: JobId, file: String, body: Bytes) -> Result<()> {
+        debug!("put_job_file: id={}", id);
+
+        let jobs = self.inner.lock().await;
+        // Look for the specified Job...
+        if jobs.contains(id) {
+            let job = &jobs[id];
+            let p = job.wrk_dir().join(&file);
+            info!("client request to put a file: {}", p.display());
+            match std::fs::File::create(p) {
+                Ok(mut f) => {
+                    let _ = f.write_all(&body);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("{}", e);
+                }
+            }
+        }
+        bail!("job not found: {}", id);
+    }
+
+    async fn contains_job(&self, id: JobId) -> bool {
+        self.inner.lock().await.contains(id)
+    }
+
+    /// Insert job into the queue.
+    async fn insert_job(&mut self, mut job: Job) -> JobId {
+        let mut jobs = self.inner.lock().await;
+        job.build();
+
+        let jid = jobs.insert(job);
+        info!("Job {} created.", jid);
+        jid
+    }
+
+    pub async fn get_job_file(&self, id: JobId, file: String) -> Result<Vec<u8>> {
+        debug!("get_job_file: id={}", id);
+        let jobs = self.inner.lock().await;
+
+        // Look for the specified Job...
+        if jobs.contains(id) {
+            let job = &jobs[id];
+            let p = job.wrk_dir().join(&file);
+            info!("client request file: {}", p.display());
+
+            match std::fs::File::open(p) {
+                Ok(mut f) => {
+                    let mut buffer = Vec::new();
+                    f.read_to_end(&mut buffer)?;
+                    return Ok(buffer);
+                }
+                Err(e) => {
+                    bail!("open file error: {}", e);
+                }
+            }
+        } else {
+            bail!("job not found: {}", id);
+        }
+    }
+
+    pub async fn list_job_files(&self, id: JobId) -> Result<Vec<PathBuf>> {
+        info!("list files for job {}", id);
+        let jobs = self.inner.lock().await;
+
+        // List files for the specified Job...
+        if jobs.contains(id) {
+            let mut list = vec![];
+            let job = &jobs[id];
+            for entry in std::fs::read_dir(job.wrk_dir()).expect("list dir") {
+                if let Ok(entry) = entry {
+                    let p = entry.path();
+                    if p.is_file() {
+                        list.push(p);
+                    }
+                }
+            }
+            return Ok(list);
+        } else {
+            bail!("job id not found: {}", id);
+        }
+    }
+}
+// db:1 ends here
+
+// [[file:../runners.note::*server][server:1]]
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Computation server.
@@ -40,7 +170,6 @@ impl Server {
     fn new(addr: &str) -> Self {
         let addrs: Vec<_> = addr.to_socket_addrs().expect("bad address").collect();
 
-        dbg!(&addrs);
         match addrs.len() {
             0 => {
                 panic!("no valid server address!");
@@ -58,7 +187,7 @@ impl Server {
         }
     }
 }
-// base/server:1 ends here
+// server:1 ends here
 
 // [[file:../runners.note::*imports][imports:1]]
 use bytes::Bytes;
@@ -68,56 +197,41 @@ use warp::*;
 
 // [[file:../runners.note::*create job][create job:1]]
 /// POST /jobs with JSON body
-async fn create_job(mut create: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+async fn create_job(create: Job, mut db: Db) -> Result<impl warp::Reply, warp::Rejection> {
     info!("create_job: {:?}", create);
-    let mut jobs = db.lock().await;
-
-    // run command
-    create.build();
-
-    // Insert job into the queue.
-    let jid = jobs.insert(create);
-    info!("Job {} created.", jid);
-
+    let jid = db.insert_job(create).await;
     Ok(warp::reply::json(&jid))
 }
 // create job:1 ends here
 
 // [[file:../runners.note::*delete job][delete job:1]]
 /// DELETE /jobs/:id
-async fn delete_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("delete_job: id={}", id);
-    let mut jobs = db.lock().await;
-
-    if jobs.contains(id) {
-        let _ = jobs.remove(id);
-
-        // respond with a `204 No Content`, which means successful,
-        // yet no body expected...
-        Ok(warp::http::StatusCode::NO_CONTENT)
-    } else {
-        debug!("    -> job id not found!");
-        // Reject this request with a `404 Not Found`...
-        Err(warp::reject::not_found())
+async fn delete_job(id: JobId, mut db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+    match db.delete_job(id).await {
+        Ok(_) => {
+            // respond with a `204 No Content`, which means successful,
+            // yet no body expected...
+            Ok(warp::http::StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            error!("cannot delete job {}: {}", id, e);
+            // Reject this request with a `404 Not Found`...
+            Err(warp::reject::not_found())
+        }
     }
 }
 // delete job:1 ends here
 
 // [[file:../runners.note::*update job][update job:1]]
 /// PUT /jobs/:id with JSON body
-async fn update_job(id: JobId, update: Job, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    debug!("update_job: id={}, job={:?}", id, update);
-    let mut jobs = db.lock().await;
-
-    // Look for the specified Job...
-    if jobs.contains(id) {
-        jobs[id] = update;
-        return Ok(warp::reply());
+async fn update_job(id: JobId, update: Job, mut db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+    match db.update_job(id, update).await {
+        Ok(_) => Ok(warp::reply()),
+        Err(e) => {
+            error!("{}", e);
+            Err(warp::reject::not_found())
+        }
     }
-
-    // If the for loop didn't return OK, then the ID doesn't exist...
-    debug!("    -> job id not found!");
-    Err(warp::reject::not_found())
 }
 // update job:1 ends here
 
@@ -127,34 +241,20 @@ async fn update_job(id: JobId, update: Job, db: Db) -> Result<impl warp::Reply, 
 /// GET /jobs
 async fn list_jobs(db: Db) -> Result<impl warp::Reply, std::convert::Infallible> {
     info!("list jobs");
-    let jobs = db.lock().await;
-    let list: Vec<JobId> = jobs.iter().map(|(k, _)| k).collect();
+    let list = db.get_job_list().await;
     Ok(warp::reply::json(&list))
 }
 
 /// List files in job working directory
 ///
 /// GET /jobs/:id/files
-async fn list_job_files(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    let mut jobs = db.lock().await;
-    info!("list files for job {}", id);
-
-    // List files for the specified Job...
-    if jobs.contains(id) {
-        let mut list = vec![];
-        let job = &jobs[id];
-        for entry in std::fs::read_dir(job.wrk_dir()).expect("list dir") {
-            if let Ok(entry) = entry {
-                let p = entry.path();
-                if p.is_file() {
-                    list.push(p);
-                }
-            }
+async fn list_job_files(id: JobId, mut db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+    match db.list_job_files(id).await {
+        Ok(list) => Ok(warp::reply::json(&list)),
+        Err(e) => {
+            error!("{}", e);
+            Err(warp::reject::not_found())
         }
-        return Ok(warp::reply::json(&list));
-    } else {
-        // If the for loop didn't return OK, then the ID doesn't exist...
-        Err(warp::reject::not_found())
     }
 }
 // list job:1 ends here
@@ -162,69 +262,33 @@ async fn list_job_files(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rej
 // [[file:../runners.note::*job files][job files:1]]
 // `GET` /jobs/:id/files/:file
 async fn get_job_file(id: JobId, file: String, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    debug!("get_job_file: id={}", id);
-    let mut jobs = db.lock().await;
-
-    // Look for the specified Job...
-    if jobs.contains(id) {
-        let job = &jobs[id];
-        let p = job.wrk_dir().join(&file);
-        info!("client request file: {}", p.display());
-
-        match std::fs::File::open(p) {
-            Ok(mut f) => {
-                let mut buffer = Vec::new();
-                f.read_to_end(&mut buffer).unwrap();
-                return Ok(buffer);
-            }
-            Err(e) => {
-                error!("{}", e);
-            }
+    match db.get_job_file(id, file).await {
+        Ok(buffer) => Ok(buffer),
+        Err(e) => {
+            Err(warp::reject::not_found())
         }
     }
-
-    // If the for loop didn't return OK, then the ID doesn't exist...
-    Err(warp::reject::not_found())
 }
 
 /// `PUT` /jobs/:id/files/:file
-async fn put_job_file(
-    id: JobId,
-    file: String,
-    db: Db,
-    body: Bytes,
-) -> Result<impl warp::Reply, warp::Rejection> {
-    debug!("put_job_file: id={}", id);
-    let mut jobs = db.lock().await;
-    // Look for the specified Job...
-    if jobs.contains(id) {
-        let job = &jobs[id];
-        let p = job.wrk_dir().join(&file);
-        info!("client request to put a file: {}", p.display());
-        match std::fs::File::create(p) {
-            Ok(mut f) => {
-                let _ = f.write_all(&body);
-                return Ok(warp::reply());
-            }
-            Err(e) => {
-                error!("{}", e);
-            }
+async fn put_job_file(id: JobId, file: String, mut db: Db, body: Bytes) -> Result<impl warp::Reply, warp::Rejection> {
+    match db.put_job_file(id, file, body).await {
+        Ok(_) => Ok(warp::reply()),
+        Err(e) => {
+            error!("{}", e);
+            // If the for loop didn't return OK, then the ID doesn't exist...
+            Err(warp::reject::not_found())
         }
     }
-
-    // If the for loop didn't return OK, then the ID doesn't exist...
-    Err(warp::reject::not_found())
 }
 // job files:1 ends here
 
 // [[file:../runners.note::*shutdown][shutdown:1]]
 // shutdown server
 // DELETE /jobs
-pub async fn shutdown_server(db: Db) -> Result<impl warp::Reply, std::convert::Infallible> {
+async fn shutdown_server(mut db: Db) -> Result<impl warp::Reply, std::convert::Infallible> {
     info!("shudown server now ...");
-    // drop jobs
-    let mut jobs = db.lock().await;
-    jobs.clear();
+    db.clear_jobs();
 
     send_signal(libc::SIGINT);
     Ok(warp::http::StatusCode::NO_CONTENT)
@@ -244,19 +308,16 @@ pub fn send_signal(signal: libc::c_int) {
 // [[file:../runners.note::*wait job][wait job:1]]
 /// GET /jobs/:id
 async fn wait_job(id: JobId, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("wait_job: id={}", id);
-
-    let mut jobs = db.lock().await;
-    if jobs.contains(id) {
-        &jobs[id].start().await;
-        &jobs[id].wait().await;
-        // respond with a `204 No Content`, which means successful,
-        // yet no body expected...
-        Ok(warp::http::StatusCode::NO_CONTENT)
-    } else {
-        debug!("    -> job id not found!");
-        // Reject this request with a `404 Not Found`...
-        Err(warp::reject::not_found())
+    match db.wait_job(id).await {
+        Ok(_) => {
+            // respond with a `204 No Content`, which means successful,
+            // yet no body expected...
+            Ok(warp::http::StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            // Reject this request with a `404 Not Found`...
+            Err(warp::reject::not_found())
+        }
     }
 }
 // wait job:1 ends here
@@ -269,7 +330,7 @@ impl Server {
 
         // Turn our "state", our db, into a Filter so we can combine it
         // easily with others...
-        let db = blank_db();
+        let db = Db::new();
         let db = warp::any().map(move || db.clone());
 
         // Just the path segment "jobs"...
@@ -345,7 +406,6 @@ impl Server {
             .or(get_file)
             .or(put_file);
 
-        // View access logs by setting `RUST_LOG=jobs`.
         let routes = api.with(warp::log("jobs"));
         let server = warp::serve(routes);
 
