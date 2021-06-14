@@ -1,162 +1,10 @@
 // [[file:../runners.note::*imports][imports:1]]
 // #![deny(warnings)]
 use crate::common::*;
-
-use serde::{Deserialize, Serialize};
-// imports:1 ends here
-
-// [[file:../runners.note::*db][db:1]]
-use crate::job::Id as JobId;
-use crate::job::Job;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::job::{Db, Job, JobId};
 
 pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:3030";
-
-type Jobs = slab::Slab<Job>;
-
-/// A simple in-memory DB for computational jobs.
-#[derive(Clone)]
-struct Db {
-    inner: Arc<Mutex<Jobs>>,
-}
-
-impl Db {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Jobs::new())),
-        }
-    }
-
-    async fn update_job(&mut self, id: JobId, new_job: Job) -> Result<()> {
-        debug!("update_job: id={}, job={:?}", id, new_job);
-        let mut jobs = self.inner.lock().await;
-
-        // Look for the specified Job...
-        if jobs.contains(id) {
-            jobs[id] = new_job;
-            Ok(())
-        } else {
-            bail!("Job id not found: {}", id);
-        }
-    }
-
-    async fn delete_job(&mut self, id: JobId) -> Result<()> {
-        info!("delete_job: id={}", id);
-        let mut jobs = self.inner.lock().await;
-
-        if jobs.contains(id) {
-            let _ = jobs.remove(id);
-            Ok(())
-        } else {
-            bail!("Job id not found: {}", id);
-        }
-    }
-
-    async fn get_job_list(&self) -> Vec<JobId> {
-        self.inner.lock().await.iter().map(|(k, _)| k).collect()
-    }
-
-    async fn clear_jobs(&mut self) {
-        self.inner.lock().await.clear();
-    }
-
-    async fn wait_job(&self, id: JobId) -> Result<()> {
-        info!("wait_job: id={}", id);
-        let mut jobs = self.inner.lock().await;
-        if jobs.contains(id) {
-            &jobs[id].start().await;
-            &jobs[id].wait().await;
-            Ok(())
-        } else {
-            bail!("job not found: {}", id);
-        }
-    }
-
-    pub async fn put_job_file(&mut self, id: JobId, file: String, body: Bytes) -> Result<()> {
-        debug!("put_job_file: id={}", id);
-
-        let jobs = self.inner.lock().await;
-        // Look for the specified Job...
-        if jobs.contains(id) {
-            let job = &jobs[id];
-            let p = job.wrk_dir().join(&file);
-            info!("client request to put a file: {}", p.display());
-            match std::fs::File::create(p) {
-                Ok(mut f) => {
-                    let _ = f.write_all(&body);
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!("{}", e);
-                }
-            }
-        }
-        bail!("job not found: {}", id);
-    }
-
-    async fn contains_job(&self, id: JobId) -> bool {
-        self.inner.lock().await.contains(id)
-    }
-
-    /// Insert job into the queue.
-    async fn insert_job(&mut self, mut job: Job) -> JobId {
-        let mut jobs = self.inner.lock().await;
-        job.build();
-
-        let jid = jobs.insert(job);
-        info!("Job {} created.", jid);
-        jid
-    }
-
-    pub async fn get_job_file(&self, id: JobId, file: String) -> Result<Vec<u8>> {
-        debug!("get_job_file: id={}", id);
-        let jobs = self.inner.lock().await;
-
-        // Look for the specified Job...
-        if jobs.contains(id) {
-            let job = &jobs[id];
-            let p = job.wrk_dir().join(&file);
-            info!("client request file: {}", p.display());
-
-            match std::fs::File::open(p) {
-                Ok(mut f) => {
-                    let mut buffer = Vec::new();
-                    f.read_to_end(&mut buffer)?;
-                    return Ok(buffer);
-                }
-                Err(e) => {
-                    bail!("open file error: {}", e);
-                }
-            }
-        } else {
-            bail!("job not found: {}", id);
-        }
-    }
-
-    pub async fn list_job_files(&self, id: JobId) -> Result<Vec<PathBuf>> {
-        info!("list files for job {}", id);
-        let jobs = self.inner.lock().await;
-
-        // List files for the specified Job...
-        if jobs.contains(id) {
-            let mut list = vec![];
-            let job = &jobs[id];
-            for entry in std::fs::read_dir(job.wrk_dir()).expect("list dir") {
-                if let Ok(entry) = entry {
-                    let p = entry.path();
-                    if p.is_file() {
-                        list.push(p);
-                    }
-                }
-            }
-            return Ok(list);
-        } else {
-            bail!("job id not found: {}", id);
-        }
-    }
-}
-// db:1 ends here
+// imports:1 ends here
 
 // [[file:../runners.note::*server][server:1]]
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -191,7 +39,6 @@ impl Server {
 
 // [[file:../runners.note::*imports][imports:1]]
 use bytes::Bytes;
-use tokio::io::AsyncWriteExt;
 use warp::*;
 // imports:1 ends here
 
@@ -448,8 +295,6 @@ pub(self) async fn bind(addr: &str) {
 // [[file:../runners.note::*pub/cli][pub/cli:1]]
 use gosh_core::gut;
 use structopt::*;
-
-use gut::prelude::*;
 
 /// Application server for remote calculations.
 #[derive(StructOpt, Debug)]

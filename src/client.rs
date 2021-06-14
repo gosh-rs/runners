@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::common::*;
 use crate::server::*;
 
-use crate::job::Id as JobId;
-use crate::job::Job;
+use crate::job::{Job, JobId};
 // imports:1 ends here
 
 // [[file:../runners.note::*base][base:1]]
