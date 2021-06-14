@@ -45,7 +45,6 @@ use warp::*;
 // [[file:../runners.note::*create job][create job:1]]
 /// POST /jobs with JSON body
 async fn create_job(create: Job, mut db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("create_job: {:?}", create);
     let jid = db.insert_job(create).await;
     Ok(warp::reply::json(&jid))
 }
@@ -109,7 +108,7 @@ async fn list_job_files(id: JobId, mut db: Db) -> Result<impl warp::Reply, warp:
 // [[file:../runners.note::*job files][job files:1]]
 // `GET` /jobs/:id/files/:file
 async fn get_job_file(id: JobId, file: String, db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-    match db.get_job_file(id, file).await {
+    match db.get_job_file(id, file.as_ref()).await {
         Ok(buffer) => Ok(buffer),
         Err(e) => {
             Err(warp::reject::not_found())
