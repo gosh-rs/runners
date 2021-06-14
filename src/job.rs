@@ -7,25 +7,6 @@ use serde::{Deserialize, Serialize};
 use tempfile::{tempdir, tempdir_in, TempDir};
 // imports:1 ends here
 
-// [[file:../runners.note::*status][status:1]]
-#[derive(Clone, Debug)]
-enum Status {
-    NotStarted,
-    Running,
-    /// failure code
-    Failure(i32),
-    Success,
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Self::NotStarted
-    }
-}
-
-pub type Id = usize;
-// status:1 ends here
-
 // [[file:../runners.note::*base][base:1]]
 /// Represents a computational job.
 #[derive(Debug, Deserialize, Serialize)]
@@ -33,9 +14,6 @@ pub struct Job {
     // FIXME:
     pub(crate) input: String,
     pub(crate) script: String,
-
-    #[serde(skip)]
-    status: Status,
 
     // FIXME:
     // /// A short string describing the computation job.
@@ -83,7 +61,6 @@ impl Job {
             inp_file: "job.inp".into(),
 
             // state variables
-            status: Status::default(),
             session: None,
             wrk_dir: None,
             extra_files: vec![],
@@ -121,47 +98,6 @@ impl Job {
 
     pub fn run_file(&self) -> PathBuf {
         self.wrk_dir().join(&self.run_file)
-    }
-
-    /// Return a list of full path to extra files required for computation.
-    pub fn extra_files(&self) -> Vec<PathBuf> {
-        self.extra_files.iter().map(|f| self.wrk_dir().join(f)).collect()
-    }
-
-    /// Check if job has been done correctly.
-    pub fn is_done(&self) -> bool {
-        let inpfile = self.inp_file();
-        let outfile = self.out_file();
-        let errfile = self.err_file();
-
-        if self.wrk_dir().is_dir() {
-            if outfile.is_file() && inpfile.is_file() {
-                if let Ok(time2) = outfile.metadata().and_then(|m| m.modified()) {
-                    if let Ok(time1) = inpfile.metadata().and_then(|m| m.modified()) {
-                        if time2 >= time1 {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Update file timestamps to make sure `is_done` call return true.
-    pub fn fake_done(&self) {
-        unimplemented!()
-    }
-
-    /// Add a new file into extra-files list.
-    pub fn attach_file<P: AsRef<Path>>(&mut self, file: P) {
-        let file: PathBuf = file.as_ref().into();
-        if !self.extra_files.contains(&file) {
-            self.extra_files.push(file);
-        } else {
-            warn!("try to attach a dumplicated file: {}!", file.display());
-        }
     }
 }
 // base:1 ends here
@@ -265,15 +201,17 @@ impl Job {
         Ok(())
     }
 }
+// core:1 ends here
 
+// [[file:../runners.note::*drop][drop:1]]
 impl Drop for Job {
     fn drop(&mut self) {
         self.terminate();
     }
 }
-// core:1 ends here
+// drop:1 ends here
 
-// [[file:../runners.note::*db][db:1]]
+// [[file:../runners.note::*core][core:1]]
 mod db {
     use super::*;
 
@@ -281,21 +219,18 @@ mod db {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    type Jobs = slab::Slab<Job>;
+    pub use super::impl_jobs_slotmap::Id;
+    use super::impl_jobs_slotmap::JobKey;
+    use super::impl_jobs_slotmap::Jobs;
+
+    // pub use super::impl_jobs_slab::Id;
+    // use super::impl_jobs_slab::JobKey;
+    // use super::impl_jobs_slab::Jobs;
 
     /// A simple in-memory DB for computational jobs.
     #[derive(Clone)]
     pub struct Db {
         inner: Arc<Mutex<Jobs>>,
-    }
-
-    // Look for the specified Job...
-    async fn check_job<'a>(jobs: &'a tokio::sync::MutexGuard<'_, Jobs>, id: JobId) -> Result<()> {
-        if jobs.contains(id) {
-            Ok(())
-        } else {
-            bail!("Job id not found: {}", id);
-        }
     }
 
     impl Db {
@@ -310,19 +245,15 @@ mod db {
         pub async fn update_job(&mut self, id: JobId, new_job: Job) -> Result<()> {
             debug!("update_job: id={}, job={:?}", id, new_job);
             let mut jobs = self.inner.lock().await;
-
-            check_job(&jobs, id).await?;
-            jobs[id] = new_job;
+            let k = jobs.check_job(id)?;
+            jobs[k] = new_job;
 
             Ok(())
         }
 
         pub async fn delete_job(&mut self, id: JobId) -> Result<()> {
             info!("delete_job: id={}", id);
-            let mut jobs = self.inner.lock().await;
-            check_job(&jobs, id).await?;
-
-            let _ = jobs.remove(id);
+            self.inner.lock().await.remove(id)?;
             Ok(())
         }
 
@@ -337,10 +268,9 @@ mod db {
         pub async fn wait_job(&self, id: JobId) -> Result<()> {
             info!("wait_job: id={}", id);
             let mut jobs = self.inner.lock().await;
-            check_job(&jobs, id).await?;
-
-            jobs[id].start().await?;
-            jobs[id].wait().await;
+            let k = jobs.check_job(id)?;
+            jobs[k].start().await?;
+            jobs[k].wait().await;
             Ok(())
         }
 
@@ -348,7 +278,7 @@ mod db {
             debug!("put_job_file: id={}", id);
 
             let jobs = self.inner.lock().await;
-            check_job(&jobs, id).await?;
+            let id = jobs.check_job(id)?;
 
             let job = &jobs[id];
             let p = job.wrk_dir().join(&file);
@@ -364,12 +294,9 @@ mod db {
             }
         }
 
-        async fn contains_job(&self, id: JobId) -> bool {
-            self.inner.lock().await.contains(id)
-        }
-
         /// Insert job into the queue.
         pub async fn insert_job(&mut self, mut job: Job) -> JobId {
+            info!("create_job: {:?}", job);
             let mut jobs = self.inner.lock().await;
             job.build();
 
@@ -381,8 +308,7 @@ mod db {
         pub async fn get_job_file(&self, id: JobId, file: String) -> Result<Vec<u8>> {
             debug!("get_job_file: id={}", id);
             let jobs = self.inner.lock().await;
-            check_job(&jobs, id).await?;
-
+            let id = jobs.check_job(id)?;
             let job = &jobs[id];
             let p = job.wrk_dir().join(&file);
             info!("client request file: {}", p.display());
@@ -398,7 +324,7 @@ mod db {
         pub async fn list_job_files(&self, id: JobId) -> Result<Vec<PathBuf>> {
             info!("list files for job {}", id);
             let jobs = self.inner.lock().await;
-            check_job(&jobs, id).await?;
+            let id = jobs.check_job(id)?;
 
             let mut list = vec![];
             let job = &jobs[id];
@@ -414,9 +340,179 @@ mod db {
         }
     }
 }
-// db:1 ends here
+// core:1 ends here
+
+// [[file:../runners.note::*slab][slab:1]]
+mod impl_jobs_slab {
+    use super::*;
+    use slab::Slab;
+
+    pub type Id = usize;
+    pub(super) type JobKey = usize;
+
+    pub struct Jobs {
+        inner: Slab<Job>,
+    }
+
+    impl Jobs {
+        pub fn new() -> Self {
+            Self { inner: Slab::new() }
+        }
+
+        // Look for the specified Job...
+        pub fn check_job(&self, id: Id) -> Result<JobKey> {
+            if self.inner.contains(id) {
+                Ok(id)
+            } else {
+                bail!("Job id not found: {}", id);
+            }
+        }
+
+        pub fn insert(&mut self, job: Job) -> Id {
+            self.inner.insert(job)
+        }
+
+        pub fn remove(&mut self, id: JobKey) -> Result<()> {
+            let _ = self.inner.remove(id);
+            Ok(())
+        }
+
+        pub fn clear(&mut self) {
+            self.inner.clear();
+        }
+
+        pub fn iter(&self) -> impl Iterator<Item = (Id, &Job)> {
+            self.inner.iter()
+        }
+    }
+
+    impl std::ops::Index<JobKey> for Jobs {
+        type Output = Job;
+
+        fn index(&self, key: JobKey) -> &Self::Output {
+            &self.inner[key]
+        }
+    }
+
+    impl std::ops::IndexMut<JobKey> for Jobs {
+        fn index_mut(&mut self, key: JobKey) -> &mut Self::Output {
+            &mut self.inner[key]
+        }
+    }
+}
+// slab:1 ends here
+
+// [[file:../runners.note::*slotmap][slotmap:1]]
+mod impl_jobs_slotmap {
+    use super::*;
+
+    use bimap::BiMap;
+    use slotmap::Key;
+    use slotmap::{DefaultKey, SlotMap};
+
+    pub type Id = usize;
+    pub(super) type JobKey = DefaultKey;
+
+    pub struct Jobs {
+        inner: SlotMap<DefaultKey, Job>,
+        mapping: BiMap<usize, JobKey>,
+    }
+
+    impl Jobs {
+        /// Create empty `Jobs`
+        pub fn new() -> Self {
+            Self {
+                inner: SlotMap::new(),
+                mapping: BiMap::new(),
+            }
+        }
+
+        /// Look for the Job with `id`, returning error if the job with `id`
+        /// does not exist.
+        pub fn check_job(&self, id: Id) -> Result<JobKey> {
+            if let Some(&k) = self.mapping.get_by_left(&id) {
+                Ok(k)
+            } else {
+                bail!("Job id not found: {}", id);
+            }
+        }
+
+        /// Insert a new Job into database, returning Id for later operations.
+        pub fn insert(&mut self, job: Job) -> Id {
+            let k = self.inner.insert(job);
+            let n = self.mapping.len() + 1;
+            if let Err(e) = self.mapping.insert_no_overwrite(n, k) {
+                panic!("invalid {:?}", e);
+            }
+            n
+        }
+
+        /// Remove the job with `id`
+        pub fn remove(&mut self, id: Id) -> Result<()> {
+            let k = self.check_job(id)?;
+            let _ = self.inner.remove(k);
+            Ok(())
+        }
+
+        /// Remove all created jobs
+        pub fn clear(&mut self) {
+            self.inner.clear();
+        }
+
+        /// Iterator over a tuple of `Id` and `Job`.
+        pub fn iter(&self) -> impl Iterator<Item = (Id, &Job)> {
+            self.inner.iter().map(move |(k, v)| (self.to_id(k), v))
+        }
+
+        fn to_id(&self, k: JobKey) -> Id {
+            if let Some(&id) = self.mapping.get_by_right(&k) {
+                id
+            } else {
+                panic!("invalid job key {:?}", k);
+            }
+        }
+    }
+
+    impl std::ops::Index<JobKey> for Jobs {
+        type Output = Job;
+
+        fn index(&self, key: JobKey) -> &Self::Output {
+            &self.inner[key]
+        }
+    }
+
+    impl std::ops::IndexMut<JobKey> for Jobs {
+        fn index_mut(&mut self, key: JobKey) -> &mut Self::Output {
+            &mut self.inner[key]
+        }
+    }
+}
+// slotmap:1 ends here
 
 // [[file:../runners.note::*pub][pub:1]]
+/// The global state within threads 
 pub use self::db::Db;
-pub use self::Id as JobId;
+
+/// The job `Id` from user side
+pub use self::db::Id as JobId;
 // pub:1 ends here
+
+// [[file:../runners.note::*test][test:1]]
+#[test]
+fn test_slotmap() {
+    use slotmap::Key;
+    use slotmap::SlotMap;
+
+    let mut sm = SlotMap::new();
+    let foo = sm.insert("foo"); // Key generated on insert.
+    let bar = sm.insert("bar");
+    dbg!(foo.data().as_ffi());
+    let x = format!("{:?}", foo.data());
+    dbg!(x);
+    dbg!(foo.data().as_ffi());
+    let x = sm.remove(foo);
+    dbg!(x);
+    let x = sm.remove(foo);
+    dbg!(x);
+}
+// test:1 ends here
