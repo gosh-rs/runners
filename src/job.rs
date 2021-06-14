@@ -289,36 +289,41 @@ mod db {
         inner: Arc<Mutex<Jobs>>,
     }
 
+    // Look for the specified Job...
+    async fn check_job<'a>(jobs: &'a tokio::sync::MutexGuard<'_, Jobs>, id: JobId) -> Result<()> {
+        if jobs.contains(id) {
+            Ok(())
+        } else {
+            bail!("Job id not found: {}", id);
+        }
+    }
+
     impl Db {
+        /// Create an empty `Db`
         pub fn new() -> Self {
             Self {
                 inner: Arc::new(Mutex::new(Jobs::new())),
             }
         }
 
+        /// Update the job in `id` with a `new_job`.
         pub async fn update_job(&mut self, id: JobId, new_job: Job) -> Result<()> {
             debug!("update_job: id={}, job={:?}", id, new_job);
             let mut jobs = self.inner.lock().await;
 
-            // Look for the specified Job...
-            if jobs.contains(id) {
-                jobs[id] = new_job;
-                Ok(())
-            } else {
-                bail!("Job id not found: {}", id);
-            }
+            check_job(&jobs, id).await?;
+            jobs[id] = new_job;
+
+            Ok(())
         }
 
         pub async fn delete_job(&mut self, id: JobId) -> Result<()> {
             info!("delete_job: id={}", id);
             let mut jobs = self.inner.lock().await;
+            check_job(&jobs, id).await?;
 
-            if jobs.contains(id) {
-                let _ = jobs.remove(id);
-                Ok(())
-            } else {
-                bail!("Job id not found: {}", id);
-            }
+            let _ = jobs.remove(id);
+            Ok(())
         }
 
         pub async fn get_job_list(&self) -> Vec<JobId> {
@@ -332,35 +337,31 @@ mod db {
         pub async fn wait_job(&self, id: JobId) -> Result<()> {
             info!("wait_job: id={}", id);
             let mut jobs = self.inner.lock().await;
-            if jobs.contains(id) {
-                &jobs[id].start().await;
-                &jobs[id].wait().await;
-                Ok(())
-            } else {
-                bail!("job not found: {}", id);
-            }
+            check_job(&jobs, id).await?;
+
+            jobs[id].start().await?;
+            jobs[id].wait().await;
+            Ok(())
         }
 
         pub async fn put_job_file(&mut self, id: JobId, file: String, body: Bytes) -> Result<()> {
             debug!("put_job_file: id={}", id);
 
             let jobs = self.inner.lock().await;
-            // Look for the specified Job...
-            if jobs.contains(id) {
-                let job = &jobs[id];
-                let p = job.wrk_dir().join(&file);
-                info!("client request to put a file: {}", p.display());
-                match std::fs::File::create(p) {
-                    Ok(mut f) => {
-                        let _ = f.write_all(&body);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        error!("{}", e);
-                    }
+            check_job(&jobs, id).await?;
+
+            let job = &jobs[id];
+            let p = job.wrk_dir().join(&file);
+            info!("client request to put a file: {}", p.display());
+            match std::fs::File::create(p) {
+                Ok(mut f) => {
+                    f.write_all(&body).context("write job file")?;
+                    Ok(())
+                }
+                Err(e) => {
+                    bail!("create file error:\n{}", e);
                 }
             }
-            bail!("job not found: {}", id);
         }
 
         async fn contains_job(&self, id: JobId) -> bool {
@@ -380,48 +381,36 @@ mod db {
         pub async fn get_job_file(&self, id: JobId, file: String) -> Result<Vec<u8>> {
             debug!("get_job_file: id={}", id);
             let jobs = self.inner.lock().await;
+            check_job(&jobs, id).await?;
 
-            // Look for the specified Job...
-            if jobs.contains(id) {
-                let job = &jobs[id];
-                let p = job.wrk_dir().join(&file);
-                info!("client request file: {}", p.display());
+            let job = &jobs[id];
+            let p = job.wrk_dir().join(&file);
+            info!("client request file: {}", p.display());
 
-                match std::fs::File::open(p) {
-                    Ok(mut f) => {
-                        let mut buffer = Vec::new();
-                        f.read_to_end(&mut buffer)?;
-                        return Ok(buffer);
-                    }
-                    Err(e) => {
-                        bail!("open file error: {}", e);
-                    }
-                }
-            } else {
-                bail!("job not found: {}", id);
-            }
+            let mut buffer = Vec::new();
+            let _ = std::fs::File::open(p)
+                .context("open file")?
+                .read_to_end(&mut buffer)
+                .context("read file")?;
+            Ok(buffer)
         }
 
         pub async fn list_job_files(&self, id: JobId) -> Result<Vec<PathBuf>> {
             info!("list files for job {}", id);
             let jobs = self.inner.lock().await;
+            check_job(&jobs, id).await?;
 
-            // List files for the specified Job...
-            if jobs.contains(id) {
-                let mut list = vec![];
-                let job = &jobs[id];
-                for entry in std::fs::read_dir(job.wrk_dir()).expect("list dir") {
-                    if let Ok(entry) = entry {
-                        let p = entry.path();
-                        if p.is_file() {
-                            list.push(p);
-                        }
+            let mut list = vec![];
+            let job = &jobs[id];
+            for entry in std::fs::read_dir(job.wrk_dir()).context("list dir")? {
+                if let Ok(entry) = entry {
+                    let p = entry.path();
+                    if p.is_file() {
+                        list.push(p);
                     }
                 }
-                return Ok(list);
-            } else {
-                bail!("job id not found: {}", id);
             }
+            Ok(list)
         }
     }
 }
